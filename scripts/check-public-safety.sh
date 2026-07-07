@@ -44,9 +44,9 @@ if [[ -n "$personal_hits" ]]; then
 fi
 
 for local_path in \
-  "notion-context-sync/.env" \
-  "notion-context-sync/mirror.config.json" \
-  "notion-context-mcp-worker/.dev.vars" \
+  "mycontext-sync/.env" \
+  "mycontext-sync/mirror.config.json" \
+  "mycontext-mcp-worker/.dev.vars" \
   "MEMORY.md"; do
   if [[ -e "$local_path" ]] && ! git check-ignore -q "$local_path"; then
     echo "Public safety check failed: $local_path exists but is not ignored." >&2

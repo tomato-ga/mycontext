@@ -1,4 +1,4 @@
-# notion-context-mcp-worker
+# mycontext-mcp-worker
 
 Read-only Remote MCP server for synced Notion context stored in TiDB Cloud.
 

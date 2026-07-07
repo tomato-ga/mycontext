@@ -6,9 +6,9 @@ This project is public, but personal runtime data stays local.
 
 Do not commit these files:
 
-- `notion-context-sync/.env`
-- `notion-context-sync/mirror.config.json`
-- `notion-context-mcp-worker/.dev.vars`
+- `mycontext-sync/.env`
+- `mycontext-sync/mirror.config.json`
+- `mycontext-mcp-worker/.dev.vars`
 - `MEMORY.md`
 - `**/MEMORY.md`
 - `logs/`
@@ -42,7 +42,7 @@ wrangler secret put TIDB_DATABASE_URL
 wrangler secret put MCP_ACCESS_TOKEN
 ```
 
-Local Worker development can use `notion-context-mcp-worker/.dev.vars`, which is
+Local Worker development can use `mycontext-mcp-worker/.dev.vars`, which is
 ignored by git.
 
 ## Before Pushing
@@ -56,11 +56,11 @@ Run:
 Then run the subproject checks:
 
 ```bash
-cd notion-context-sync
+cd mycontext-sync
 pnpm run typecheck
 pnpm test
 
-cd ../notion-context-mcp-worker
+cd ../mycontext-mcp-worker
 pnpm run typecheck
 pnpm test
 ```

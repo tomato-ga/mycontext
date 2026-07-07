@@ -1,4 +1,4 @@
-# notion-context-sync
+# mycontext-sync
 
 Notion profile pages to TiDB sync CLI.
 

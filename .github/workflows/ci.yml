@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  notion-context-sync:
+  mycontext-sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,16 +17,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: notion-context-sync/pnpm-lock.yaml
+          cache-dependency-path: mycontext-sync/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-        working-directory: notion-context-sync
+        working-directory: mycontext-sync
       - run: ./scripts/check-public-safety.sh
       - run: pnpm run typecheck
-        working-directory: notion-context-sync
+        working-directory: mycontext-sync
       - run: pnpm test
-        working-directory: notion-context-sync
+        working-directory: mycontext-sync
 
-  notion-context-mcp-worker:
+  mycontext-mcp-worker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,11 +37,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: notion-context-mcp-worker/pnpm-lock.yaml
+          cache-dependency-path: mycontext-mcp-worker/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-        working-directory: notion-context-mcp-worker
+        working-directory: mycontext-mcp-worker
       - run: ./scripts/check-public-safety.sh
       - run: pnpm run typecheck
-        working-directory: notion-context-mcp-worker
+        working-directory: mycontext-mcp-worker
       - run: pnpm test
-        working-directory: notion-context-mcp-worker
+        working-directory: mycontext-mcp-worker

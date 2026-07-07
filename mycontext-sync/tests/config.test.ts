@@ -46,7 +46,7 @@ describe("config", () => {
 });
 
 async function writeConfig(value: unknown): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "notion-context-config-"));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mycontext-config-"));
   const configPath = path.join(dir, "mirror.config.json");
   await fs.writeFile(configPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   return configPath;

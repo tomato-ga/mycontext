@@ -1,5 +1,5 @@
 {
-  "name": "notion-context-mcp-worker",
+  "name": "mycontext-mcp-worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",

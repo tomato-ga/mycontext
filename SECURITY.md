@@ -6,17 +6,17 @@ This repository is intended to be safe to publish publicly. It should not contai
 
 Use local environment files for development and platform secrets for production:
 
-- `notion-context-sync/.env`
-- `notion-context-mcp-worker/.dev.vars`
+- `mycontext-sync/.env`
+- `mycontext-mcp-worker/.dev.vars`
 - Wrangler secrets for deployed Workers
 
 Only example files should be committed:
 
-- `notion-context-sync/.env.example`
-- `notion-context-sync/mirror.config.example.json`
-- `notion-context-mcp-worker/.dev.vars.example`
+- `mycontext-sync/.env.example`
+- `mycontext-sync/mirror.config.example.json`
+- `mycontext-mcp-worker/.dev.vars.example`
 
-For personal use, prefer `MIRROR_CONFIG_JSON` inside `notion-context-sync/.env`
+For personal use, prefer `MIRROR_CONFIG_JSON` inside `mycontext-sync/.env`
 for private Notion page IDs and titles. `mirror.config.json` remains supported
 as an ignored local file.
 

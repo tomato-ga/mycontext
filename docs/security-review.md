@@ -31,7 +31,7 @@ No committed production secrets should be included in the public repository. Rea
 ### SEC-003: Worker responses should include baseline hardening headers
 
 - Severity: Low
-- Location: `notion-context-mcp-worker/src/index.ts`
+- Location: `mycontext-mcp-worker/src/index.ts`
 - Evidence: `withSecurityHeaders` now adds `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`.
 - Impact: these headers reduce accidental browser interpretation, referrer leakage, and framing of public responses.
 - Fix: wrap health, auth error, not found, and MCP responses with baseline headers.
@@ -40,7 +40,7 @@ No committed production secrets should be included in the public repository. Rea
 ### SEC-004: Bearer token comparison should avoid length-based early return
 
 - Severity: Low
-- Location: `notion-context-mcp-worker/src/auth.ts`
+- Location: `mycontext-mcp-worker/src/auth.ts`
 - Evidence: `constantTimeEqual` now compares across the maximum input length and includes length in the diff.
 - Impact: avoids a length-based timing shortcut in token comparison.
 - Fix: remove early return for unequal lengths.
@@ -48,9 +48,9 @@ No committed production secrets should be included in the public repository. Rea
 
 ## Positive Checks
 
-- `notion-context-sync/src/tidb.ts` uses parameterized queries for page reads, writes, and search terms. The only interpolated SQL values are validated database names and integer `LIMIT` values.
-- `notion-context-mcp-worker/src/tidb.ts` validates `topK` before interpolating `LIMIT`, and uses query parameters for user search text.
-- `notion-context-sync/src/obsidianExport.ts` verifies export paths remain inside the configured vault/output directory.
+- `mycontext-sync/src/tidb.ts` uses parameterized queries for page reads, writes, and search terms. The only interpolated SQL values are validated database names and integer `LIMIT` values.
+- `mycontext-mcp-worker/src/tidb.ts` validates `topK` before interpolating `LIMIT`, and uses query parameters for user search text.
+- `mycontext-sync/src/obsidianExport.ts` verifies export paths remain inside the configured vault/output directory.
 - The Worker does not call the Notion API, run migrations, write to TiDB, expose raw SQL, or read/write Obsidian files.
 - `/mcp` requires `Authorization: Bearer $MCP_ACCESS_TOKEN`; `/healthz` returns only `ok`.
 
@@ -59,12 +59,12 @@ No committed production secrets should be included in the public repository. Rea
 Verified before publishing:
 
 ```bash
-cd notion-context-sync
+cd mycontext-sync
 pnpm run typecheck
 pnpm test
 pnpm audit --audit-level moderate
 
-cd ../notion-context-mcp-worker
+cd ../mycontext-mcp-worker
 pnpm run typecheck
 pnpm test
 pnpm audit --audit-level moderate

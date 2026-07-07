@@ -13,7 +13,7 @@ import { registerSearchTextTool } from "./tools/searchText.js";
 const MCP_ROUTE = "/mcp";
 
 function createServer(config: AppConfig): McpServer {
-  const server = new McpServer({ name: "notion-context-mcp", version: "0.2.0" });
+  const server = new McpServer({ name: "mycontext-mcp", version: "0.2.0" });
   const client = createTidbClient(config.tidbDatabaseUrl);
 
   registerListDocumentsTool(server, client);

@@ -41,8 +41,8 @@ Notion pages
   -> AI client
 ```
 
-- `notion-context-sync`: Notion から Markdown を取得して TiDB に保存する CLI。
-- `notion-context-mcp-worker`: TiDB を読む read-only Remote MCP server。
+- `mycontext-sync`: Notion から Markdown を取得して TiDB に保存する CLI。
+- `mycontext-mcp-worker`: TiDB を読む read-only Remote MCP server。
 - `export-obsidian`: TiDB から Obsidian `_notion_pages/` に Markdown を書き出す補助機能。
 
 ### 3. 意図的に入れなかったもの

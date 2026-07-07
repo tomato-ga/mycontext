@@ -10,8 +10,8 @@ cd "$PROJECT_DIR"
 mkdir -p logs
 
 {
-  echo "=== notion-context obsidian sync start $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+  echo "=== mycontext obsidian sync start $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
   "$PNPM_BIN" pull
   "$PNPM_BIN" export-obsidian
-  echo "=== notion-context obsidian sync done $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+  echo "=== mycontext obsidian sync done $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
 } >> logs/obsidian-sync.log 2>&1
