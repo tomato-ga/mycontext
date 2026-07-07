@@ -1,0 +1,32 @@
+.DS_Store
+Thumbs.db
+
+# Local memory front pages and runtime state.
+MEMORY.md
+**/MEMORY.md
+.project-memory/
+.longtermMemory/
+
+# Dependencies and build output.
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.wrangler/
+**/.wrangler/
+
+# Secrets and local runtime configuration.
+.env
+.env.*
+!.env.example
+.dev.vars
+*.local
+mirror.config.json
+
+# Logs and local databases.
+logs/
+**/logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3

@@ -1,0 +1,96 @@
+import "dotenv/config";
+import { runDoctor } from "./commands/doctor.js";
+import { runExportObsidian } from "./commands/exportObsidian.js";
+import { runMigrate } from "./commands/migrate.js";
+import { runPull } from "./commands/pull.js";
+import { runSearch } from "./commands/search.js";
+import { AppError, errorMessage, type CliFlags } from "./types.js";
+
+try {
+  const command = process.argv[2];
+  const flags = parseFlags(process.argv.slice(3));
+  switch (command) {
+    case "migrate":
+      await runMigrate(flags);
+      break;
+    case "pull":
+      await runPull(flags);
+      break;
+    case "doctor":
+      await runDoctor(flags);
+      break;
+    case "export-obsidian":
+      await runExportObsidian(flags);
+      break;
+    case "search":
+      await runSearch(flags);
+      break;
+    default:
+      throw new AppError("unknown_command", `unknown command: ${command ?? "(missing)"}`, 3);
+  }
+} catch (error) {
+  if (error instanceof AppError) {
+    console.error(`${error.code}: ${error.message}`);
+    process.exit(error.exitCode);
+  }
+  console.error(`unexpected_error: ${errorMessage(error)}`);
+  process.exit(1);
+}
+
+export function parseFlags(args: string[]): CliFlags {
+  const flags: CliFlags = {
+    config: "mirror.config.json",
+    dryRun: false,
+    reindex: false,
+    topK: 5
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--":
+        continue;
+      case "--config":
+        flags.config = requireValue(args, ++index, "--config");
+        break;
+      case "--page-id":
+        flags.pageId = requireValue(args, ++index, "--page-id");
+        break;
+      case "--dry-run":
+        flags.dryRun = true;
+        break;
+      case "--reindex":
+        flags.reindex = true;
+        break;
+      case "--query":
+        flags.query = requireValue(args, ++index, "--query");
+        break;
+      case "--top-k": {
+        const topK = Number(requireValue(args, ++index, "--top-k"));
+        if (!Number.isInteger(topK) || topK <= 0) {
+          throw new AppError("invalid_flag", "--top-k must be a positive integer", 3);
+        }
+        flags.topK = topK;
+        break;
+      }
+      case "--vault-path":
+        flags.vaultPath = requireValue(args, ++index, "--vault-path");
+        break;
+      case "--output-dir":
+        flags.outputDir = requireValue(args, ++index, "--output-dir");
+        break;
+      default:
+        throw new AppError("unknown_flag", `unknown flag: ${arg ?? "(missing)"}`, 3);
+    }
+  }
+
+  return flags;
+}
+
+function requireValue(args: string[], index: number, flag: string): string {
+  const value = args[index];
+  if (!value || value.startsWith("--")) {
+    throw new AppError("missing_flag_value", `${flag} requires a value`, 3);
+  }
+  return value;
+}

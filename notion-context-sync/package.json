@@ -1,0 +1,27 @@
+{
+  "name": "notion-context-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "tsx src/cli.ts migrate",
+    "pull": "tsx src/cli.ts pull",
+    "doctor": "tsx src/cli.ts doctor",
+    "export-obsidian": "tsx src/cli.ts export-obsidian",
+    "search": "tsx src/cli.ts search",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "mysql2": "^3.11.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.10"
+  }
+}
