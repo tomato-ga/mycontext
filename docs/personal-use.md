@@ -16,8 +16,8 @@ Do not commit these files:
 - `.wrangler/`
 
 They are ignored by git. They can contain Notion page IDs, private page titles,
-Notion API keys, TiDB credentials, MCP bearer tokens, local logs, or generated
-memory summaries.
+absolute local Markdown source paths, Notion API keys, TiDB credentials, OAuth
+secrets, local logs, or generated memory summaries.
 
 ## Recommended Local Setup
 
@@ -25,6 +25,9 @@ Keep personal Notion seed pages in `.env`:
 
 ```env
 MIRROR_CONFIG_JSON={"pages":[{"pageId":"your-private-page-id","title":"your-private-page-title"}]}
+EDITOR_KNOWLEDGE_SOURCE_ROOT=/absolute/path/to/noteAI
+BUSINESS_KNOWLEDGE_SOURCE_ROOT=/absolute/path/to/claude/skills
+AUTHOR_STYLE_SOURCE_ROOT=/absolute/path/to/noteAI
 ```
 
 `MIRROR_CONFIG_JSON` takes precedence over `mirror.config.json`. This lets you
@@ -33,13 +36,37 @@ keep the sync target and credentials together in the ignored `.env` file.
 Existing local `mirror.config.json` files still work. If `MIRROR_CONFIG_JSON`
 is absent, the CLI reads `mirror.config.json` as before.
 
+`BUSINESS_KNOWLEDGE_SOURCE_ROOT` is used only with a fixed two-file allowlist.
+The absolute value is never stored in TiDB or exposed by MCP; TiDB stores only
+the public-safe relative source key.
+
+`AUTHOR_STYLE_SOURCE_ROOT` is also local-only. The author-style sync reads only
+the fixed title/body paths under `knowledge/`; TiDB stores relative source keys,
+full Markdown revisions, and semantic sections, never the machine-local root.
+
+For the business corpus, use the dedicated migration and sync commands. They
+only create/write `business_knowledge_documents` and
+`business_knowledge_sections`; the sync path contains no `DELETE`, `TRUNCATE`,
+`DROP`, or writes to the existing Notion/editor tables.
+
+```bash
+pnpm migrate-business-knowledge
+pnpm pull-business-knowledge
+pnpm doctor-business-knowledge
+pnpm migrate-author-style
+pnpm pull-author-style
+pnpm doctor-author-style
+```
+
 ## Production Secrets
 
 Use platform secrets for deployed Worker values:
 
 ```bash
 wrangler secret put TIDB_DATABASE_URL
-wrangler secret put MCP_ACCESS_TOKEN
+wrangler secret put GITHUB_CLIENT_ID
+wrangler secret put GITHUB_CLIENT_SECRET
+wrangler secret put GITHUB_ALLOWED_USER_ID
 ```
 
 Local Worker development can use `mycontext-mcp-worker/.dev.vars`, which is

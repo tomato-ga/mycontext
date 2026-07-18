@@ -1,8 +1,19 @@
 import "dotenv/config";
 import { runDoctor } from "./commands/doctor.js";
+import { runDoctorBusinessKnowledge } from "./commands/doctorBusinessKnowledge.js";
+import { runDoctorAuthorStyle } from "./commands/doctorAuthorStyle.js";
+import { runDoctorEditorKnowledge } from "./commands/doctorEditorKnowledge.js";
+import { runDoctorMetaskill } from "./commands/doctorMetaskill.js";
 import { runExportObsidian } from "./commands/exportObsidian.js";
 import { runMigrate } from "./commands/migrate.js";
+import { runMigrateBusinessKnowledge } from "./commands/migrateBusinessKnowledge.js";
+import { runMigrateAuthorStyle } from "./commands/migrateAuthorStyle.js";
+import { runMigrateMetaskill } from "./commands/migrateMetaskill.js";
 import { runPull } from "./commands/pull.js";
+import { runPullBusinessKnowledge } from "./commands/pullBusinessKnowledge.js";
+import { runPullAuthorStyle } from "./commands/pullAuthorStyle.js";
+import { runPullEditorKnowledge } from "./commands/pullEditorKnowledge.js";
+import { runPullMetaskill } from "./commands/pullMetaskill.js";
 import { runSearch } from "./commands/search.js";
 import { AppError, errorMessage, type CliFlags } from "./types.js";
 
@@ -16,8 +27,41 @@ try {
     case "pull":
       await runPull(flags);
       break;
+    case "pull-editor-knowledge":
+      await runPullEditorKnowledge(flags);
+      break;
+    case "migrate-business-knowledge":
+      await runMigrateBusinessKnowledge(flags);
+      break;
+    case "migrate-author-style":
+      await runMigrateAuthorStyle(flags);
+      break;
+    case "migrate-metaskill":
+      await runMigrateMetaskill(flags);
+      break;
+    case "pull-business-knowledge":
+      await runPullBusinessKnowledge(flags);
+      break;
+    case "pull-author-style":
+      await runPullAuthorStyle(flags);
+      break;
+    case "pull-metaskill":
+      await runPullMetaskill(flags);
+      break;
     case "doctor":
       await runDoctor(flags);
+      break;
+    case "doctor-editor-knowledge":
+      await runDoctorEditorKnowledge(flags);
+      break;
+    case "doctor-business-knowledge":
+      await runDoctorBusinessKnowledge(flags);
+      break;
+    case "doctor-author-style":
+      await runDoctorAuthorStyle(flags);
+      break;
+    case "doctor-metaskill":
+      await runDoctorMetaskill(flags);
       break;
     case "export-obsidian":
       await runExportObsidian(flags);

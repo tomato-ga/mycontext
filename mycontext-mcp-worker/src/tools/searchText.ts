@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { MCP_SCOPE } from "../constants.js";
 import { searchText, TopKValidationError, validateTopK, type TidbClient } from "../tidb.js";
-
-const MAX_TEXT_LENGTH = 1_500;
+import { buildSearchToolResult } from "./searchResult.js";
 
 const inputSchema = {
   query: z.string().trim().min(1).max(1_000),
@@ -13,8 +13,17 @@ export function registerSearchTextTool(server: McpServer, client: TidbClient): v
   server.registerTool(
     "search_text",
     {
-      description: "Plain-text LIKE search over full synced Notion page markdown.",
-      inputSchema
+      title: "Search document text",
+      description:
+        "LIKE-search alias across synced documents and semantic business-knowledge spans.",
+      inputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] }
     },
     async ({ query, topK }) => {
       let limitedTopK: number;
@@ -31,24 +40,7 @@ export function registerSearchTextTool(server: McpServer, client: TidbClient): v
       }
 
       const hits = await searchText(client, query, limitedTopK);
-      const results = hits.map((hit) => ({
-        ...hit,
-        text: excerpt(hit.text, hit.match_position, MAX_TEXT_LENGTH)
-      }));
-      const output = { results };
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }],
-        structuredContent: output
-      };
+      return buildSearchToolResult(hits);
     }
   );
-}
-
-function excerpt(text: string, matchPosition: number, maxLength: number): string {
-  const index = Math.max(0, matchPosition - 1);
-  const start = Math.max(0, index - Math.floor(maxLength / 3));
-  const end = Math.min(text.length, start + maxLength);
-  const prefix = start > 0 ? "..." : "";
-  const suffix = end < text.length ? "..." : "";
-  return `${prefix}${text.slice(start, end)}${suffix}`;
 }

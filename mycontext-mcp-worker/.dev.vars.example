@@ -1,2 +1,4 @@
 TIDB_DATABASE_URL=mysql://<user>:<password>@<host>/<database>
-MCP_ACCESS_TOKEN=xxx
+GITHUB_CLIENT_ID=<github-oauth-app-client-id>
+GITHUB_CLIENT_SECRET=<github-oauth-app-client-secret>
+GITHUB_ALLOWED_USER_ID=<numeric-github-user-id>

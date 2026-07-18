@@ -1,0 +1,227 @@
+import { isDeepStrictEqual } from "node:util";
+import {
+  AUTHOR_STYLE_SOURCES,
+  authorStyleSourceRootFromEnv,
+  loadAuthorStyleDocument
+} from "../authorStyle.js";
+import {
+  buildAuthorStyleContext,
+  enumerateAuthorStyleSelectors,
+  parseAuthorStyleRoutingManifest
+} from "../authorStyleRouting.js";
+import { sha256 } from "../hash.js";
+import { createTidbClientFromEnv } from "../tidb.js";
+import { errorMessage, type CliFlags } from "../types.js";
+
+type DoctorStatus =
+  | "ok"
+  | "source_invalid"
+  | "missing_tidb_document"
+  | "missing_active_revision"
+  | "document_mismatch"
+  | "revision_mismatch"
+  | "section_count_mismatch"
+  | "section_mismatch"
+  | "routing_invalid";
+
+export async function runDoctorAuthorStyle(_flags: CliFlags): Promise<void> {
+  const sourceRoot = authorStyleSourceRootFromEnv();
+  const client = createTidbClientFromEnv();
+  const results: Array<Record<string, unknown>> = [];
+
+  try {
+    await client.ping();
+    for (const source of AUTHOR_STYLE_SOURCES) {
+      try {
+        const local = await loadAuthorStyleDocument(sourceRoot, source);
+        const storedDocument = await client.getAuthorStyleDocument(source.documentId);
+        if (storedDocument === null) {
+          results.push({
+            documentId: source.documentId,
+            status: "missing_tidb_document" satisfies DoctorStatus,
+            expectedSections: local.sectionCount,
+            warnings: []
+          });
+          continue;
+        }
+        if (storedDocument.active_revision_sha256 === null) {
+          results.push({
+            documentId: source.documentId,
+            status: "missing_active_revision" satisfies DoctorStatus,
+            warnings: []
+          });
+          continue;
+        }
+        const storedRevision = await client.getAuthorStyleRevision(
+          source.documentId,
+          storedDocument.active_revision_sha256
+        );
+        if (storedRevision === null) {
+          results.push({
+            documentId: source.documentId,
+            status: "missing_active_revision" satisfies DoctorStatus,
+            activeRevisionSha256: storedDocument.active_revision_sha256,
+            warnings: []
+          });
+          continue;
+        }
+        const rows = await client.listAuthorStyleSections(
+          source.documentId,
+          storedDocument.active_revision_sha256
+        );
+
+        const documentMatches = storedDocument.author_key === local.authorKey
+          && storedDocument.style_scope === local.styleScope
+          && storedDocument.display_name === local.displayName
+          && storedDocument.source_path_key === local.sourcePathKey
+          && storedDocument.active_revision_sha256 === local.revisionSha256
+          && storedDocument.status === "active";
+        const revisionMatches = storedRevision.revision_sha256 === local.revisionSha256
+          && storedRevision.source_markdown === local.sourceMarkdown
+          && storedRevision.source_markdown_sha256 === local.sourceMarkdownSha256
+          && sha256(storedRevision.source_markdown) === storedRevision.source_markdown_sha256
+          && Number(storedRevision.source_bytes) === local.sourceBytes
+          && Number(storedRevision.source_line_count) === local.sourceLineCount
+          && storedRevision.parser_version === local.parserVersion
+          && storedRevision.sectioning_version === local.sectioningVersion
+          && storedRevision.routing_version === local.routingVersion
+          && jsonEquivalent(storedRevision.routing_manifest_json, local.routingManifest)
+          && jsonEquivalent(storedRevision.outline_json, local.outline)
+          && Number(storedRevision.section_count) === local.sectionCount
+          && Number(storedRevision.delivery_section_count) === local.deliverySectionCount
+          && Number(storedRevision.search_span_count) === local.searchSpanCount;
+
+        const localById = new Map(local.sections.map((section) => [section.sectionId, section]));
+        const sectionsMatch = rows.every((row) => {
+          const expected = localById.get(row.section_id);
+          return expected !== undefined
+            && row.revision_sha256 === expected.revisionSha256
+            && row.context_key === expected.contextKey
+            && row.parent_section_id === expected.parentSectionId
+            && row.delivery_section_id === expected.deliverySectionId
+            && row.section_type === expected.sectionType
+            && row.content_layer === expected.contentLayer
+            && Number(row.context_priority) === expected.contextPriority
+            && nullableNumber(row.heading_level) === expected.headingLevel
+            && row.title === expected.title
+            && stringArrayEquivalent(row.heading_path_json, expected.headingPath)
+            && stringArrayEquivalent(row.aliases_json, expected.aliases)
+            && Number(row.ordinal) === expected.ordinal
+            && Number(row.source_line_start) === expected.sourceLineStart
+            && Number(row.source_line_end) === expected.sourceLineEnd
+            && Number(row.content_chars) === expected.contentChars
+            && nullableNumber(row.estimated_tokens) === expected.estimatedTokens
+            && row.direct_markdown === expected.directMarkdown
+            && row.delivery_markdown === expected.deliveryMarkdown
+            && row.retrieval_text === expected.retrievalText
+            && row.content_sha256 === expected.contentSha256
+            && sha256(row.direct_markdown) === row.content_sha256
+            && booleanLike(row.is_searchable) === expected.isSearchable;
+        });
+
+        let routingStatus: DoctorStatus = "ok";
+        let minimumContextChars: number | null = null;
+        let maximumContextChars: number | null = null;
+        let routingCombinations = 0;
+        let routingWarning: string | null = null;
+        try {
+          const manifest = parseAuthorStyleRoutingManifest(local.routingManifest);
+          const contextSections = new Map(local.sections.flatMap((section) => {
+            return section.contextKey === null ? [] : [[section.contextKey, {
+              contextKey: section.contextKey,
+              title: section.title,
+              markdown: section.deliveryMarkdown
+            }] as const];
+          }));
+          for (const selectors of enumerateAuthorStyleSelectors(manifest)) {
+            const context = buildAuthorStyleContext({
+              documentId: local.documentId,
+              displayName: local.displayName,
+              revisionSha256: local.revisionSha256,
+              manifest,
+              selectors,
+              sections: contextSections
+            });
+            routingCombinations += 1;
+            minimumContextChars = minimumContextChars === null
+              ? context.contextChars
+              : Math.min(minimumContextChars, context.contextChars);
+            maximumContextChars = maximumContextChars === null
+              ? context.contextChars
+              : Math.max(maximumContextChars, context.contextChars);
+          }
+        } catch (error) {
+          routingStatus = "routing_invalid";
+          routingWarning = errorMessage(error);
+        }
+
+        const status: DoctorStatus = !documentMatches
+          ? "document_mismatch"
+          : !revisionMatches
+            ? "revision_mismatch"
+            : rows.length !== local.sectionCount
+              ? "section_count_mismatch"
+              : !sectionsMatch
+                ? "section_mismatch"
+                : routingStatus;
+        results.push({
+          documentId: source.documentId,
+          displayName: local.displayName,
+          status,
+          sourceMarkdownSha256: local.sourceMarkdownSha256,
+          activeRevisionSha256: storedDocument.active_revision_sha256,
+          expectedSections: local.sectionCount,
+          storedSections: rows.length,
+          expectedDeliverySections: local.deliverySectionCount,
+          storedDeliverySections: rows.filter((row) => row.section_type === "delivery").length,
+          expectedSearchSpans: local.searchSpanCount,
+          storedSearchSpans: rows.filter((row) => row.section_type === "search_span").length,
+          routingCombinations,
+          minimumContextChars,
+          maximumContextChars,
+          maxContextChars: parseAuthorStyleRoutingManifest(local.routingManifest).maxContextChars,
+          sourceMtimeMs: local.sourceMtimeMs,
+          storedSourceMtimeMs: Number(storedRevision.source_mtime_ms),
+          sourceMtimeChangedWithoutContent:
+            Number(storedRevision.source_mtime_ms) !== local.sourceMtimeMs,
+          warnings: routingWarning === null ? [] : [routingWarning]
+        });
+      } catch (error) {
+        results.push({
+          documentId: source.documentId,
+          status: "source_invalid" satisfies DoctorStatus,
+          warnings: [errorMessage(error)]
+        });
+      }
+    }
+  } finally {
+    await client.close();
+  }
+
+  const failed = results.some((result) => result.status !== "ok");
+  console.log(JSON.stringify({ status: failed ? "failed" : "ok", documents: results }, null, 2));
+  if (failed) process.exitCode = 2;
+}
+
+function booleanLike(value: boolean | number): boolean {
+  return value === true || value === 1;
+}
+
+function nullableNumber(value: number | string | null): number | null {
+  return value === null ? null : Number(value);
+}
+
+function parseJson(value: unknown): unknown {
+  return typeof value === "string" ? JSON.parse(value) as unknown : value;
+}
+
+function jsonEquivalent(actual: unknown, expected: unknown): boolean {
+  return isDeepStrictEqual(parseJson(actual), expected);
+}
+
+function stringArrayEquivalent(actual: string | string[], expected: string[]): boolean {
+  const parsed = parseJson(actual);
+  return Array.isArray(parsed)
+    && parsed.every((item) => typeof item === "string")
+    && JSON.stringify(parsed) === JSON.stringify(expected);
+}

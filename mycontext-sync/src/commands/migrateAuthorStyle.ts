@@ -1,0 +1,19 @@
+import path from "node:path";
+import { createTidbClientFromEnv } from "../tidb.js";
+import { toAppError, type CliFlags } from "../types.js";
+
+export async function runMigrateAuthorStyle(_flags: CliFlags): Promise<void> {
+  const client = createTidbClientFromEnv();
+  try {
+    const statements = await client.applySchema(path.resolve("author-style-schema.sql"));
+    console.log(JSON.stringify({
+      status: "ok",
+      scope: "author_style_only",
+      statements
+    }, null, 2));
+  } catch (error) {
+    throw toAppError(error, "migrate_author_style_failed", "author style migration failed", 3);
+  } finally {
+    await client.close();
+  }
+}

@@ -1,0 +1,80 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  loadAuthorStyleDocument,
+  type AuthorStyleSource,
+  type LoadedAuthorStyleDocument
+} from "../src/authorStyle.js";
+import { syncAuthorStyleDocument, type AuthorStyleWriter } from "../src/syncAuthorStyle.js";
+
+vi.mock("../src/authorStyle.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/authorStyle.js")>();
+  return { ...actual, loadAuthorStyleDocument: vi.fn() };
+});
+
+const source: AuthorStyleSource = {
+  documentId: "ore-title-style",
+  authorKey: "ore",
+  styleScope: "title",
+  relativePath: "knowledge/title.md"
+};
+
+const document: LoadedAuthorStyleDocument = {
+  documentId: "ore-title-style",
+  authorKey: "ore",
+  styleScope: "title",
+  displayName: "Title style",
+  sourcePathKey: source.relativePath,
+  sourceMarkdown: "# Title style",
+  sourceMarkdownSha256: "a".repeat(64),
+  sourceBytes: 13,
+  sourceLineCount: 1,
+  sourceMtimeMs: 1,
+  revisionSha256: "b".repeat(64),
+  parserVersion: "parser-v1",
+  sectioningVersion: "sections-v1",
+  routingVersion: "routing-v1",
+  routingManifest: {},
+  outline: {},
+  sectionCount: 0,
+  deliverySectionCount: 0,
+  searchSpanCount: 0,
+  sections: []
+};
+
+describe("syncAuthorStyleDocument", () => {
+  beforeEach(() => {
+    vi.mocked(loadAuthorStyleDocument).mockResolvedValue(document);
+  });
+
+  it("skips an already active immutable revision", async () => {
+    const writer: AuthorStyleWriter = {
+      getAuthorStyleDocumentRevision: vi.fn().mockResolvedValue(document.revisionSha256),
+      upsertAuthorStyleDocumentAndSections: vi.fn()
+    };
+
+    await expect(syncAuthorStyleDocument({
+      sourceRoot: "/tmp/source",
+      source,
+      tidbClient: writer,
+      dryRun: false,
+      reindex: false
+    })).resolves.toMatchObject({ status: "skipped", dbIndexed: false });
+    expect(writer.upsertAuthorStyleDocumentAndSections).not.toHaveBeenCalled();
+  });
+
+  it("writes and activates the revision when reindex is requested", async () => {
+    const writer: AuthorStyleWriter = {
+      getAuthorStyleDocumentRevision: vi.fn().mockResolvedValue(document.revisionSha256),
+      upsertAuthorStyleDocumentAndSections: vi.fn()
+    };
+
+    await expect(syncAuthorStyleDocument({
+      sourceRoot: "/tmp/source",
+      source,
+      tidbClient: writer,
+      dryRun: false,
+      reindex: true
+    })).resolves.toMatchObject({ status: "synced", dbIndexed: true });
+    expect(writer.upsertAuthorStyleDocumentAndSections).toHaveBeenCalledWith(document);
+  });
+});

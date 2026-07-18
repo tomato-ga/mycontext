@@ -21,7 +21,7 @@ fi
 
 secret_hits="$(
   git grep -n -E \
-    '(ntn_[A-Za-z0-9]|gho_[A-Za-z0-9]|github_pat_|sk-[A-Za-z0-9]{20}|mysql://[^<[:space:]]*:[^<[:space:]]*@|MCP_ACCESS_TOKEN=[A-Za-z0-9_-]{16,}|TIDB_PASSWORD=[^<[:space:]]+|NOTION_API_KEY=ntn_)' \
+    '(ntn_[A-Za-z0-9]|gho_[A-Za-z0-9]|github_pat_|sk-[A-Za-z0-9]{20}|mysql://[^<[:space:]]*:[^<[:space:]]*@|GITHUB_CLIENT_SECRET=[^<[:space:]]+|TIDB_PASSWORD=[^<[:space:]]+|NOTION_API_KEY=ntn_)' \
     -- . ':(exclude)scripts/check-public-safety.sh' ':(exclude)**/pnpm-lock.yaml' || true
 )"
 

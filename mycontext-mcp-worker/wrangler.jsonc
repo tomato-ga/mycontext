@@ -3,5 +3,18 @@
   "name": "mycontext-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-06",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "88cc0f72224947fc818c0520207164de"
+    },
+    {
+      "binding": "AUTH_KV",
+      "id": "3c6429869d7e41b19f3423670f2c1c90"
+    }
+  ],
+  "triggers": {
+    "crons": ["17 4 * * *"]
+  }
 }

@@ -1,13 +1,24 @@
 import { z } from "zod";
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
 export interface Env {
   TIDB_DATABASE_URL: string;
-  MCP_ACCESS_TOKEN: string;
+  GITHUB_CLIENT_ID: string;
+  GITHUB_CLIENT_SECRET: string;
+  GITHUB_ALLOWED_USER_ID: string;
+  OAUTH_KV: KVNamespace;
+  AUTH_KV: KVNamespace;
+  OAUTH_PROVIDER: OAuthHelpers;
 }
 
 export interface AppConfig {
   tidbDatabaseUrl: string;
-  mcpAccessToken: string;
+}
+
+export interface AuthConfig {
+  githubClientId: string;
+  githubClientSecret: string;
+  githubAllowedUserId: number;
 }
 
 export class ConfigError extends Error {
@@ -19,28 +30,44 @@ export class ConfigError extends Error {
 
 export type EnvStringKey =
   | "TIDB_DATABASE_URL"
-  | "MCP_ACCESS_TOKEN";
+  | "GITHUB_CLIENT_ID"
+  | "GITHUB_CLIENT_SECRET"
+  | "GITHUB_ALLOWED_USER_ID";
 
 export type EnvSource = Partial<Record<EnvStringKey, string>>;
 
 const nonEmptyString = z.string().trim().min(1);
 
-const envSchema = z.object({
-  TIDB_DATABASE_URL: nonEmptyString,
-  MCP_ACCESS_TOKEN: nonEmptyString
+const appEnvSchema = z.object({
+  TIDB_DATABASE_URL: nonEmptyString
+});
+
+const authEnvSchema = z.object({
+  GITHUB_CLIENT_ID: nonEmptyString,
+  GITHUB_CLIENT_SECRET: nonEmptyString,
+  GITHUB_ALLOWED_USER_ID: z.coerce.number().int().positive()
 });
 
 export function loadConfig(env: EnvSource): AppConfig {
-  const values = validateRequiredEnv(env);
+  const values = validateEnv(appEnvSchema, env);
 
   return {
-    tidbDatabaseUrl: values.TIDB_DATABASE_URL,
-    mcpAccessToken: values.MCP_ACCESS_TOKEN
+    tidbDatabaseUrl: values.TIDB_DATABASE_URL
   };
 }
 
-export function validateRequiredEnv(env: EnvSource): z.infer<typeof envSchema> {
-  const parsed = envSchema.safeParse(env);
+export function loadAuthConfig(env: EnvSource): AuthConfig {
+  const values = validateEnv(authEnvSchema, env);
+
+  return {
+    githubClientId: values.GITHUB_CLIENT_ID,
+    githubClientSecret: values.GITHUB_CLIENT_SECRET,
+    githubAllowedUserId: values.GITHUB_ALLOWED_USER_ID
+  };
+}
+
+function validateEnv<T extends z.ZodType>(schema: T, env: EnvSource): z.infer<T> {
+  const parsed = schema.safeParse(env);
   if (parsed.success) {
     return parsed.data;
   }

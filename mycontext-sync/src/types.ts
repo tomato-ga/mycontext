@@ -2,6 +2,16 @@ export type MirrorStatus = "synced" | "conflict";
 
 export type PageSyncStatus = "synced" | "skipped" | "failed" | "dry_run";
 
+export type EditorKnowledgeDocumentId =
+  | "overview"
+  | "lesson-01"
+  | "lesson-02"
+  | "lesson-03"
+  | "lesson-04"
+  | "lesson-05"
+  | "lesson-06"
+  | "lesson-07";
+
 export interface PageConfig {
   pageId: string;
   title: string;
@@ -32,6 +42,15 @@ export interface SyncIdentifiers {
 
 export interface SyncPageResult {
   pageId: string;
+  status: PageSyncStatus;
+  markdownSha256: string;
+  dbIndexed: boolean;
+  warnings: string[];
+}
+
+export interface EditorKnowledgeSyncResult {
+  documentId: EditorKnowledgeDocumentId;
+  title: string | null;
   status: PageSyncStatus;
   markdownSha256: string;
   dbIndexed: boolean;

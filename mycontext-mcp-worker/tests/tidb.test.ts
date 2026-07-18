@@ -1,9 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  buildDocumentReadModelSql,
   buildLikePattern,
   buildSearchSql,
+  checkHealth,
   escapeLikePattern,
+  getBusinessKnowledgeSection,
+  getDocument,
+  listDocuments,
+  searchContext,
   TopKValidationError,
+  type TidbClient,
   validateTopK
 } from "../src/tidb.js";
 
@@ -32,14 +39,375 @@ describe("LIKE pattern escaping", () => {
 });
 
 describe("buildSearchSql", () => {
-  it("builds full-markdown LIKE search SQL and inlines only the prevalidated LIMIT integer", () => {
+  it("keeps full-document search and adds active-revision Small2Big section search", () => {
     const sql = buildSearchSql(5);
 
     expect(sql).toContain("LIMIT 5");
     expect(sql).not.toContain("LIMIT ?");
     expect(sql).toContain("FROM notion_pages");
-    expect(sql).toContain("markdown LIKE ? ESCAPE '\\\\'");
-    expect(sql).toContain("LOCATE(?, markdown) AS match_position");
+    expect(sql).toContain("FROM editor_knowledge_documents");
+    expect(sql).toContain("UNION ALL");
+    expect(sql).toContain("CONCAT('notion:', page_id)");
+    expect(sql).toContain("CONCAT('editor-knowledge:', document_id)");
+    expect(sql).toContain("JOIN business_knowledge_sections AS matched_sections");
+    expect(sql).toContain("matched_sections.section_revision_sha256 = documents.section_revision_sha256");
+    expect(sql).toContain("delivery_sections.section_id = matched_sections.delivery_section_id");
+    expect(sql).toContain("matched_sections.is_searchable = TRUE");
+    expect(sql).toContain("ROW_NUMBER() OVER");
+    expect(sql).toContain("PARTITION BY source_id, delivery_section_id");
+    expect(sql).toContain("WHERE delivery_match_rank = 1");
+    expect(sql).toContain("delivery_sections.section_markdown AS markdown");
+    expect(sql).toContain("LOCATE(?, delivery_sections.section_markdown) AS match_position");
+    expect(sql).toContain("LOCATE(?, matched_sections.retrieval_text) AS matched_span_position");
+    expect(sql).toContain("ORDER BY matched_span_position ASC");
+    expect(sql).toContain("matched_sections.content_layer AS matched_content_layer");
+    expect(sql).toContain("delivery_sections.content_layer AS delivery_content_layer");
+    expect(sql).toContain("documents.source_declared_at");
+    expect(sql).toContain("'$.detailAvailable'");
+    expect(sql).toContain("documents.markdown LIKE ? ESCAPE '\\\\'");
+    expect(sql).toContain("LOCATE(?, documents.markdown) AS match_position");
     expect(sql).not.toContain("VEC_COSINE_DISTANCE");
+    expect(sql).not.toMatch(/\bDELETE\b/i);
   });
 });
+
+describe("unified document read model", () => {
+  it("uses fixed table names and normalized source fields", () => {
+    const sql = buildDocumentReadModelSql();
+
+    expect(sql).toContain("'notion' AS source");
+    expect(sql).toContain("'editor_knowledge' AS source");
+    expect(sql).toContain("'business_knowledge' AS source");
+    expect(sql).toContain("FROM business_knowledge_documents");
+    expect(sql).toContain("truncated AS source_truncated");
+    expect(sql).toContain("FALSE AS source_truncated");
+    expect(sql).toContain("JSON_ARRAY() AS unknown_block_ids");
+  });
+
+  it("maps both source rows to namespaced list output", async () => {
+    const client = clientReturning([
+      {
+        document_id: "notion:page-1",
+        source: "notion",
+        source_id: "page-1",
+        title: "Profile",
+        markdown_sha256: "a".repeat(64),
+        source_kind: null,
+        ingest_scope: null,
+        source_declared_at: null,
+        detail_available: null,
+        source_truncated: 0,
+        last_synced_at: "2026-07-10T00:00:00.000Z"
+      },
+      {
+        document_id: "editor-knowledge:lesson-04",
+        source: "editor_knowledge",
+        source_id: "lesson-04",
+        title: "第4回: 編集作業",
+        markdown_sha256: "b".repeat(64),
+        source_kind: null,
+        ingest_scope: null,
+        source_declared_at: null,
+        detail_available: null,
+        source_truncated: false,
+        last_synced_at: "2026-07-10T01:00:00.000Z"
+      }
+    ]);
+
+    await expect(listDocuments(client)).resolves.toEqual([
+      {
+        document_id: "notion:page-1",
+        source: "notion",
+        source_id: "page-1",
+        title: "Profile",
+        markdown_sha256: "a".repeat(64),
+        source_kind: null,
+        ingest_scope: null,
+        source_declared_at: null,
+        detail_available: null,
+        section_revision_sha256: null,
+        section_count: null,
+        search_span_count: null,
+        source_truncated: false,
+        last_synced_at: "2026-07-10T00:00:00.000Z"
+      },
+      {
+        document_id: "editor-knowledge:lesson-04",
+        source: "editor_knowledge",
+        source_id: "lesson-04",
+        title: "第4回: 編集作業",
+        markdown_sha256: "b".repeat(64),
+        source_kind: null,
+        ingest_scope: null,
+        source_declared_at: null,
+        detail_available: null,
+        section_revision_sha256: null,
+        section_count: null,
+        search_span_count: null,
+        source_truncated: false,
+        last_synced_at: "2026-07-10T01:00:00.000Z"
+      }
+    ]);
+  });
+
+  it("gets an editor knowledge document by unified ID", async () => {
+    const execute = vi.fn().mockResolvedValue([{
+      document_id: "editor-knowledge:lesson-04",
+      source: "editor_knowledge",
+      source_id: "lesson-04",
+      title: "第4回: 編集作業",
+      markdown: "# 第4回: 編集作業",
+      markdown_sha256: "b".repeat(64),
+      source_truncated: 0,
+      unknown_block_ids: "[]",
+      last_synced_at: null
+    }]);
+    const client: TidbClient = { execute };
+
+    await expect(getDocument(client, "editor-knowledge:lesson-04")).resolves.toMatchObject({
+      document_id: "editor-knowledge:lesson-04",
+      source: "editor_knowledge",
+      unknown_block_ids: []
+    });
+    expect(execute).toHaveBeenCalledWith(expect.stringContaining("WHERE document_id = ?"), [
+      "editor-knowledge:lesson-04"
+    ]);
+  });
+
+  it("reports notion, editor knowledge, and total health counts", async () => {
+    const execute = vi.fn().mockResolvedValue([{
+      notion_documents_count: "3",
+      editor_knowledge_documents_count: "8",
+      business_knowledge_documents_count: "2",
+      business_knowledge_sections_count: "325",
+      business_knowledge_search_spans_count: "287",
+      author_style_documents_count: "2",
+      author_style_sections_count: "201",
+      author_style_search_spans_count: "141",
+      metaskill_documents_count: "1",
+      metaskill_sections_count: "270",
+      metaskill_search_spans_count: "230",
+      documents_count: "13",
+      latest_synced_at: "2026-07-10T01:00:00.000Z"
+    }]);
+    const client: TidbClient = { execute };
+
+    await expect(checkHealth(client)).resolves.toEqual({
+      ok: true,
+      db: "ok",
+      notion_documents_count: 3,
+      editor_knowledge_documents_count: 8,
+      business_knowledge_documents_count: 2,
+      business_knowledge_sections_count: 325,
+      business_knowledge_search_spans_count: 287,
+      author_style_documents_count: 2,
+      author_style_sections_count: 201,
+      author_style_search_spans_count: 141,
+      metaskill_documents_count: 1,
+      metaskill_sections_count: 270,
+      metaskill_search_spans_count: 230,
+      documents_count: 13,
+      latest_synced_at: "2026-07-10T01:00:00.000Z"
+    });
+    const sql = execute.mock.calls[0][0] as string;
+    expect(sql).toContain("active_business_section_health AS");
+    expect(sql).toContain("COUNT(*) AS business_knowledge_sections_count");
+    expect(sql).toContain("sections.is_searchable = TRUE");
+    expect(sql).toContain("sections.section_revision_sha256 = documents.section_revision_sha256");
+    expect(sql).toContain("active_author_style_health AS");
+    expect(sql).toContain("active_metaskill_health AS");
+    expect(sql).toContain("sections.revision_sha256 = documents.active_revision_sha256");
+    expect(sql).not.toContain("THEN section_count");
+    expect(sql).not.toContain("THEN search_span_count");
+  });
+
+  it("reports db:error when active section rows cannot be queried", async () => {
+    const client: TidbClient = {
+      execute: vi.fn().mockRejectedValue(new Error("SELECT denied on business_knowledge_sections"))
+    };
+    await expect(checkHealth(client)).resolves.toEqual({ ok: false, db: "error" });
+  });
+
+  it("maps business knowledge document metadata without changing existing source fields", async () => {
+    const client = clientReturning([{
+      document_id: "business-knowledge:startup-science",
+      source: "business_knowledge",
+      source_id: "startup-science",
+      title: "起業の科学",
+      markdown_sha256: "c".repeat(64),
+      source_kind: "book_summary",
+      ingest_scope: "full_summary",
+      source_declared_at: null,
+      detail_available: null,
+      section_revision_sha256: "d".repeat(64),
+      section_count: "279",
+      search_span_count: 241,
+      source_truncated: 0,
+      last_synced_at: null
+    }]);
+
+    await expect(listDocuments(client)).resolves.toEqual([{
+      document_id: "business-knowledge:startup-science",
+      source: "business_knowledge",
+      source_id: "startup-science",
+      title: "起業の科学",
+      markdown_sha256: "c".repeat(64),
+      source_kind: "book_summary",
+      ingest_scope: "full_summary",
+      source_declared_at: null,
+      detail_available: null,
+      section_revision_sha256: "d".repeat(64),
+      section_count: 279,
+      search_span_count: 241,
+      source_truncated: false,
+      last_synced_at: null
+    }]);
+  });
+});
+
+describe("business knowledge section retrieval", () => {
+  it("maps the smallest matched span to its full delivery section and stable resource URI", async () => {
+    const execute = vi.fn().mockResolvedValue([{
+      document_id: "business-knowledge:startup-science",
+      source: "business_knowledge",
+      source_id: "startup-science",
+      title: "起業の科学",
+      markdown: "## 18. エバンジェリストカスタマー\n\n親セクション全文",
+      match_position: 4,
+      matched_span_position: 7,
+      matched_section_id: "detail-18-problem-interview",
+      matched_section_title: "プロブレムインタビューの5つのポイント",
+      matched_content_layer: "detail",
+      delivery_section_id: "detail-18",
+      delivery_section_title: "18. エバンジェリストカスタマー",
+      delivery_content_layer: "detail",
+      heading_path_json: JSON.stringify(["起業の科学", "18. エバンジェリストカスタマー"]),
+      source_line_start: "1248",
+      source_line_end: 1260,
+      delivery_line_start: 1241,
+      delivery_line_end: 1300,
+      related_source_path: null,
+      freshness_class: "static_framework",
+      source_kind: "book_summary",
+      ingest_scope: "full_summary",
+      source_declared_at: null,
+      detail_available: null
+    }]);
+    const client: TidbClient = { execute };
+
+    await expect(searchContext(client, "インタビュー", 5)).resolves.toEqual([{
+      document_id: "business-knowledge:startup-science",
+      source: "business_knowledge",
+      title: "起業の科学",
+      text: "## 18. エバンジェリストカスタマー\n\n親セクション全文",
+      match_position: 4,
+      matched_span_position: 7,
+      matched_section_id: "detail-18-problem-interview",
+      matched_section_title: "プロブレムインタビューの5つのポイント",
+      matched_content_layer: "detail",
+      delivery_section_id: "detail-18",
+      delivery_section_title: "18. エバンジェリストカスタマー",
+      delivery_content_layer: "detail",
+      heading_path: ["起業の科学", "18. エバンジェリストカスタマー"],
+      source_line_start: 1248,
+      source_line_end: 1260,
+      delivery_line_start: 1241,
+      delivery_line_end: 1300,
+      related_source_path: null,
+      freshness_class: "static_framework",
+      source_kind: "book_summary",
+      ingest_scope: "full_summary",
+      source_declared_at: null,
+      detail_available: null,
+      resource_uri: "mycontext://business-knowledge/startup-science/sections/detail-18"
+    }]);
+    expect(execute).toHaveBeenCalledWith(expect.stringContaining("delivery_match_rank = 1"), [
+      "インタビュー",
+      "インタビュー",
+      "%インタビュー%",
+      "インタビュー",
+      "%インタビュー%"
+    ]);
+  });
+
+  it("reads only a section from the document's active section revision", async () => {
+    const execute = vi.fn().mockResolvedValue([{
+      document_id: "marketing-wisdom",
+      section_id: "section-25",
+      title: "AEO",
+      heading_path_json: ["Wisdom Evolution Marketing", "AEO"],
+      content_layer: "index",
+      section_markdown: "**§25 AEO** — answer engines",
+      source_line_start: 82,
+      source_line_end: 82,
+      related_source_path: "sections/10-ai-agent-aeo.md",
+      freshness_class: "time_sensitive",
+      source_kind: "web_export_index",
+      ingest_scope: "index_only",
+      source_declared_at: "2026-02-20",
+      detail_available: "false"
+    }]);
+    const client: TidbClient = { execute };
+
+    await expect(getBusinessKnowledgeSection(client, "marketing-wisdom", "section-25"))
+      .resolves.toMatchObject({
+        document_id: "marketing-wisdom",
+        section_id: "section-25",
+        content_layer: "index",
+        source_kind: "web_export_index",
+        ingest_scope: "index_only",
+        source_declared_at: "2026-02-20",
+        detail_available: false,
+        related_source_path: "sections/10-ai-agent-aeo.md",
+        resource_uri: "mycontext://business-knowledge/marketing-wisdom/sections/section-25"
+      });
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("documents.section_revision_sha256 = sections.section_revision_sha256"),
+      ["marketing-wisdom", "section-25"]
+    );
+  });
+
+  it("exposes Marketing Wisdom as a dated index-only result with no stored detail", async () => {
+    const client = clientReturning([{
+      document_id: "business-knowledge:marketing-wisdom",
+      source: "business_knowledge",
+      source_id: "marketing-wisdom",
+      title: "Wisdom Evolution Marketing",
+      markdown: "**§25 AEO** — answer engines",
+      match_position: 5,
+      matched_span_position: 12,
+      matched_section_id: "section-25",
+      matched_section_title: "AEO",
+      matched_content_layer: "index",
+      delivery_section_id: "section-25",
+      delivery_section_title: "AEO",
+      delivery_content_layer: "index",
+      heading_path_json: ["Wisdom Evolution Marketing", "AEO"],
+      source_line_start: 82,
+      source_line_end: 82,
+      delivery_line_start: 82,
+      delivery_line_end: 82,
+      related_source_path: "sections/10-ai-agent-aeo.md",
+      freshness_class: "time_sensitive",
+      source_kind: "web_export_index",
+      ingest_scope: "index_only",
+      source_declared_at: new Date("2026-02-20T00:00:00.000Z"),
+      detail_available: 0
+    }]);
+
+    await expect(searchContext(client, "AEO", 5)).resolves.toEqual([expect.objectContaining({
+      document_id: "business-knowledge:marketing-wisdom",
+      matched_content_layer: "index",
+      delivery_content_layer: "index",
+      source_kind: "web_export_index",
+      ingest_scope: "index_only",
+      source_declared_at: "2026-02-20",
+      detail_available: false,
+      related_source_path: "sections/10-ai-agent-aeo.md"
+    })]);
+  });
+});
+
+function clientReturning(rows: Record<string, unknown>[]): TidbClient {
+  return { execute: vi.fn().mockResolvedValue(rows) };
+}

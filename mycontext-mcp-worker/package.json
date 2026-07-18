@@ -7,10 +7,13 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
+    "test:live-author-style": "LIVE_AUTHOR_STYLE_SMOKE=1 vitest run tests/liveAuthorStyle.test.ts",
+    "test:live-metaskill": "LIVE_METASKILL_SMOKE=1 vitest run tests/liveMetaskill.test.ts",
     "typecheck": "tsc --noEmit",
     "tail": "wrangler tail"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tidbcloud/serverless": "^0.3.0",
     "agents": "^0.17.3",
@@ -18,6 +21,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/node": "^22.10.5",
     "typescript": "^5.7.2",
     "vite": "^8.1.3",
     "vitest": "^4.1.10",
