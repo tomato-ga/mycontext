@@ -3,6 +3,15 @@ import {
   parseAuthorStyleMarkdown,
   type LoadedAuthorStyleDocument
 } from "../../mycontext-sync/src/authorStyle.js";
+import {
+  BUSINESS_KNOWLEDGE_PARSER_VERSION,
+  BUSINESS_KNOWLEDGE_SECTIONING_VERSION
+} from "../../mycontext-sync/src/businessKnowledge.js";
+import {
+  isEditorKnowledgeSectionedDocumentId,
+  parseEditorKnowledgeSectionedMarkdown,
+  type LoadedEditorKnowledgeSectionedDocument
+} from "../../mycontext-sync/src/editorKnowledge.js";
 import { sha256 } from "./hash.js";
 import { SyncStateTrace } from "./stateLog.js";
 import {
@@ -22,6 +31,10 @@ export interface SyncDependencies {
     managed: ManagedNotionDocument;
     markdown: string;
   }) => LoadedAuthorStyleDocument;
+  parseEditorKnowledge?: (input: {
+    managed: ManagedNotionDocument;
+    markdown: string;
+  }) => LoadedEditorKnowledgeSectionedDocument;
   now?: () => Date;
   deliveryAttempt?: number;
 }
@@ -30,8 +43,14 @@ const EXPECTED_SCHEMA_VERSION = {
   "Personal Context": "personal-context-v1",
   "AI Skill": "ai-skill-v1",
   "Author Style": "author-style-v1",
+  "Editor Knowledge": "editor-knowledge-v1",
   "Metaskill": "metaskill-v1"
 } as const;
+
+type PreparedContent =
+  | { kind: "author-style"; document: LoadedAuthorStyleDocument }
+  | { kind: "editor-knowledge"; document: LoadedEditorKnowledgeSectionedDocument }
+  | null;
 
 export async function processSyncMessage(
   message: SyncMessage,
@@ -161,27 +180,47 @@ async function handleReadyPage(
       }
     });
 
-    const prepared = refreshed.category === "Author Style"
-      ? (dependencies.parseAuthorStyle ?? defaultParseAuthorStyle)({
-          managed: refreshed,
-          markdown: second.markdown
-        })
-      : null;
+    const prepared: PreparedContent = refreshed.category === "Author Style"
+      ? {
+          kind: "author-style",
+          document: (dependencies.parseAuthorStyle ?? defaultParseAuthorStyle)({
+            managed: refreshed,
+            markdown: second.markdown
+          })
+        }
+      : refreshed.category === "Editor Knowledge"
+        ? {
+            kind: "editor-knowledge",
+            document: (dependencies.parseEditorKnowledge ?? defaultParseEditorKnowledge)({
+              managed: refreshed,
+              markdown: second.markdown
+            })
+          }
+        : null;
 
     if (prepared !== null) {
+      const deliverySectionCount = prepared.kind === "author-style"
+        ? prepared.document.deliverySectionCount
+        : new Set(prepared.document.sections.map((section) => section.deliverySectionId)).size;
       trace.captureCandidate({
-        candidateRevisionSha256: prepared.revisionSha256,
-        parserVersion: prepared.parserVersion,
-        sectioningVersion: prepared.sectioningVersion,
-        routingVersion: prepared.routingVersion
+        candidateRevisionSha256: prepared.kind === "author-style"
+          ? prepared.document.revisionSha256
+          : prepared.document.sectionRevisionSha256,
+        parserVersion: prepared.kind === "author-style"
+          ? prepared.document.parserVersion
+          : BUSINESS_KNOWLEDGE_PARSER_VERSION,
+        sectioningVersion: prepared.kind === "author-style"
+          ? prepared.document.sectioningVersion
+          : BUSINESS_KNOWLEDGE_SECTIONING_VERSION,
+        routingVersion: prepared.kind === "author-style" ? prepared.document.routingVersion : undefined
       });
       await trace.record("content_validated", {
         validationStatus: "passed",
         nextAction: "persist_read_model",
         details: {
-          sectionCount: prepared.sectionCount,
-          deliverySectionCount: prepared.deliverySectionCount,
-          searchSpanCount: prepared.searchSpanCount
+          sectionCount: prepared.document.sectionCount,
+          deliverySectionCount,
+          searchSpanCount: prepared.document.searchSpanCount
         }
       });
     } else {
@@ -198,8 +237,14 @@ async function handleReadyPage(
     }
 
     const outcome = refreshed.category === "Author Style"
-      ? await syncAuthorStyle(refreshed, requirePrepared(prepared), dependencies.repository)
-      : await syncPersonalContext(refreshed, second.markdown, secondHash, dependencies.repository);
+      ? await syncAuthorStyle(refreshed, requirePreparedAuthorStyle(prepared), dependencies.repository)
+      : refreshed.category === "Editor Knowledge"
+        ? await syncEditorKnowledgeSectioned(
+            refreshed,
+            requirePreparedEditorKnowledge(prepared),
+            dependencies.repository
+          )
+        : await syncPersonalContext(refreshed, second.markdown, secondHash, dependencies.repository);
 
     if (outcome.status === "synced") {
       await trace.record("persisted", {
@@ -343,6 +388,34 @@ async function syncAuthorStyle(
   };
 }
 
+async function syncEditorKnowledgeSectioned(
+  managed: ManagedNotionDocument,
+  document: LoadedEditorKnowledgeSectionedDocument,
+  repository: SyncRepository
+): Promise<SyncOutcome> {
+  // editor_knowledge_documents has no source_path_key / ownership-conflict concept (unlike
+  // author_style_documents): the local-file-direct route for these two Document IDs has been
+  // abolished, so Notion via this sync-worker is the only writer, and a simple
+  // skip-if-unchanged check (mirroring syncAuthorStyle's) is sufficient.
+  const state = await repository.getEditorKnowledgeSectionedState(managed.documentId);
+  if (state?.activeSectionRevisionSha256 === document.sectionRevisionSha256) {
+    return {
+      pageId: managed.pageId,
+      documentId: managed.documentId,
+      status: "skipped",
+      revisionSha256: document.sectionRevisionSha256
+    };
+  }
+
+  await repository.activateEditorKnowledgeSectioned({ document });
+  return {
+    pageId: managed.pageId,
+    documentId: managed.documentId,
+    status: "synced",
+    revisionSha256: document.sectionRevisionSha256
+  };
+}
+
 function validateManagedDocument(managed: ManagedNotionDocument): void {
   if (!managed.active) {
     throw new SyncFailure("notion_document_inactive", "Active must be enabled before syncing");
@@ -411,6 +484,31 @@ function defaultParseAuthorStyle(input: {
   }
 }
 
+function defaultParseEditorKnowledge(input: {
+  managed: ManagedNotionDocument;
+  markdown: string;
+}): LoadedEditorKnowledgeSectionedDocument {
+  if (!isEditorKnowledgeSectionedDocumentId(input.managed.documentId)) {
+    throw new SyncFailure(
+      "editor_knowledge_document_id_invalid",
+      "Editor Knowledge Document ID must be kikaku-composition-playbook or kikaku-db-catalog"
+    );
+  }
+  try {
+    const canonicalMarkdown = canonicalEditorKnowledgeMarkdown(input.managed, input.markdown);
+    return parseEditorKnowledgeSectionedMarkdown({
+      documentId: input.managed.documentId,
+      markdown: canonicalMarkdown,
+      sourcePathKey: `notion:${input.managed.pageId}`
+    });
+  } catch (error) {
+    throw new SyncFailure(
+      "editor_knowledge_validation_failed",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
 export function syncFingerprint(
   managed: ManagedNotionDocument,
   markdown: string
@@ -437,13 +535,34 @@ export function canonicalAuthorStyleMarkdown(
   return `# ${managed.name}\n\n${markdown}`;
 }
 
-function requirePrepared(
-  value: LoadedAuthorStyleDocument | null
-): LoadedAuthorStyleDocument {
-  if (value === null) {
+/**
+ * Editor Knowledge pages, like Author Style pages, hold the Notion page title only in the
+ * Name property, not as an H1 block in the page body (parseEditorKnowledgeSectionedMarkdown
+ * requires the source to start with "# <title>"). Mirrors canonicalAuthorStyleMarkdown exactly:
+ * if the body already contains an H1 line, it's left alone; otherwise "# <Name>" is prepended.
+ */
+export function canonicalEditorKnowledgeMarkdown(
+  managed: Pick<ManagedNotionDocument, "name">,
+  markdown: string
+): string {
+  if (/^#(?!#)\s+\S/m.test(markdown)) return markdown;
+  return `# ${managed.name}\n\n${markdown}`;
+}
+
+function requirePreparedAuthorStyle(value: PreparedContent): LoadedAuthorStyleDocument {
+  if (value === null || value.kind !== "author-style") {
     throw new SyncFailure("author_style_not_prepared", "Author Style was not parsed");
   }
-  return value;
+  return value.document;
+}
+
+function requirePreparedEditorKnowledge(
+  value: PreparedContent
+): LoadedEditorKnowledgeSectionedDocument {
+  if (value === null || value.kind !== "editor-knowledge") {
+    throw new SyncFailure("editor_knowledge_not_prepared", "Editor Knowledge was not parsed");
+  }
+  return value.document;
 }
 
 function normalizeFailure(error: unknown): SyncFailure {

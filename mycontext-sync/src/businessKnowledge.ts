@@ -164,7 +164,7 @@ export async function loadBusinessKnowledgeDocument(
 
   let markdown: string;
   try {
-    markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+    markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes).replace(/^\uFEFF/, "");
   } catch (error) {
     throw new AppError(
       "business_knowledge_invalid_utf8",

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LoadedAuthorStyleDocument } from "../../mycontext-sync/src/authorStyle.js";
+import { parseEditorKnowledgeSectionedMarkdown } from "../../mycontext-sync/src/editorKnowledge.js";
 import { sha256 } from "../src/hash.js";
 import {
   canonicalAuthorStyleMarkdown,
@@ -47,7 +48,9 @@ describe("Notion-managed context synchronization", () => {
       appendSyncStateLog: vi.fn(),
       syncNotionPage: vi.fn(),
       getAuthorStyleState: vi.fn().mockResolvedValue(null),
-      activateAuthorStyle: vi.fn()
+      activateAuthorStyle: vi.fn(),
+      getEditorKnowledgeSectionedState: vi.fn().mockResolvedValue(null),
+      activateEditorKnowledgeSectioned: vi.fn()
     };
   });
 
@@ -385,6 +388,216 @@ describe("Notion-managed context synchronization", () => {
     )).toBe("# Existing title\n\nBody");
   });
 
+  describe("Editor Knowledge (kikaku) synchronization", () => {
+    it("restores the H1 from the Notion page Name when the page body has none, like Author Style", async () => {
+      // Notion page bodies hold only the content blocks; the title lives in the Name
+      // property, never as an H1 block in the body. This mirrors
+      // canonicalAuthorStyleMarkdown's normalization exactly.
+      const bodyWithoutH1 = [
+        "## 1. 企画の立て方",
+        "第1章の本文。",
+        "",
+        "## 2. 構成の作り方",
+        "第2章の本文。",
+        ""
+      ].join("\n");
+      currentManaged = managedDocument({
+        documentId: "kikaku-composition-playbook",
+        name: "企画構成プレイブック",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown(bodyWithoutH1));
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository,
+        now: () => now
+      });
+
+      expect(result).toMatchObject({ status: "synced" });
+      const activated = vi.mocked(repository.activateEditorKnowledgeSectioned).mock.calls[0]?.[0];
+      expect(activated?.document.title).toBe("企画構成プレイブック");
+      expect(activated?.document.markdown.startsWith("# 企画構成プレイブック\n\n## 1. 企画の立て方")).toBe(true);
+    });
+
+    it("restores the H1 for kikaku-db-catalog from its Name too", async () => {
+      const bodyWithoutH1 = [
+        "## テーマ群A｜EC×D2C戦略",
+        "グループAの概要文。",
+        "",
+        "### No.1 ｜ 最初の企画",
+        "企画1の本文。",
+        ""
+      ].join("\n");
+      currentManaged = managedDocument({
+        documentId: "kikaku-db-catalog",
+        name: "コンテンツ企画案カタログ（全424件）",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown(bodyWithoutH1));
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository,
+        now: () => now
+      });
+
+      expect(result).toMatchObject({ status: "synced" });
+      const activated = vi.mocked(repository.activateEditorKnowledgeSectioned).mock.calls[0]?.[0];
+      expect(activated?.document.title).toBe("コンテンツ企画案カタログ（全424件）");
+    });
+
+    it("syncs a Ready kikaku-composition-playbook page and marks it Synced", async () => {
+      currentManaged = managedDocument({
+        documentId: "kikaku-composition-playbook",
+        name: "企画構成プレイブック",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown(KIKAKU_PLAYBOOK_MARKDOWN));
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository,
+        now: () => now
+      });
+
+      expect(result).toMatchObject({ status: "synced", documentId: "kikaku-composition-playbook" });
+      expect(repository.activateEditorKnowledgeSectioned).toHaveBeenCalledOnce();
+      const activated = vi.mocked(repository.activateEditorKnowledgeSectioned).mock.calls[0]?.[0];
+      expect(activated?.document).toMatchObject({
+        documentId: "kikaku-composition-playbook",
+        sectionCount: 2,
+        searchSpanCount: 2
+      });
+      expect(notion.updateWorkflow).toHaveBeenLastCalledWith(pageId, expect.objectContaining({
+        status: "Synced"
+      }));
+      const entries = vi.mocked(repository.appendSyncStateLog).mock.calls.map(([entry]) => entry);
+      expect(entries.at(-1)).toMatchObject({
+        state: "synced",
+        parserVersion: "section-parser-v1",
+        sectioningVersion: "section-first-v1",
+        routingVersion: null
+      });
+    });
+
+    it("syncs a Ready kikaku-db-catalog page, preserving No.N ｜ Title and group headings", async () => {
+      currentManaged = managedDocument({
+        documentId: "kikaku-db-catalog",
+        name: "企画カタログ427",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown(KIKAKU_CATALOG_MARKDOWN));
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository,
+        now: () => now
+      });
+
+      expect(result).toMatchObject({ status: "synced", documentId: "kikaku-db-catalog" });
+      const activated = vi.mocked(repository.activateEditorKnowledgeSectioned).mock.calls[0]?.[0];
+      expect(activated?.document.sections.map((section) => section.sectionId)).toEqual([
+        "group-a",
+        "no-001",
+        "no-002"
+      ]);
+      const entry = activated?.document.sections.find((section) => section.sectionId === "no-001");
+      // the exact Markdown text Notion is expected to hand back for an entry heading — this
+      // is the round-trip fidelity the format contract depends on: the full-width pipe "｜",
+      // the "### No.N" prefix, and no flattening to a different heading level survive intact
+      expect(entry?.retrievalText).toBe("### No.1 ｜ 最初の企画\n企画1の本文。");
+      expect(entry?.title).toBe("No.1 ｜ 最初の企画");
+    });
+
+    it("skips re-activation when the section revision is unchanged", async () => {
+      currentManaged = managedDocument({
+        documentId: "kikaku-composition-playbook",
+        name: "企画構成プレイブック",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown(KIKAKU_PLAYBOOK_MARKDOWN));
+      const parsed = parseEditorKnowledgeSectionedMarkdown({
+        documentId: "kikaku-composition-playbook",
+        markdown: KIKAKU_PLAYBOOK_MARKDOWN,
+        sourcePathKey: `notion:${pageId}`
+      });
+      vi.mocked(repository.getEditorKnowledgeSectionedState).mockResolvedValue({
+        activeSectionRevisionSha256: parsed.sectionRevisionSha256
+      });
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository,
+        now: () => now
+      });
+
+      expect(result).toMatchObject({ status: "skipped" });
+      expect(repository.activateEditorKnowledgeSectioned).not.toHaveBeenCalled();
+    });
+
+    it("fails with a validation error and sets Notion to Error when the format contract is violated", async () => {
+      currentManaged = managedDocument({
+        documentId: "kikaku-composition-playbook",
+        name: "企画構成プレイブック",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      // no ## chapter headings at all — violates the format contract
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown("# 企画構成プレイブック\n\n本文のみ。\n"));
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository
+      });
+
+      expect(result).toMatchObject({ status: "failed", reason: "editor_knowledge_validation_failed" });
+      expect(repository.activateEditorKnowledgeSectioned).not.toHaveBeenCalled();
+      expect(notion.updateWorkflow).toHaveBeenLastCalledWith(pageId, expect.objectContaining({
+        status: "Error",
+        validationError: expect.stringContaining("editor_knowledge_validation_failed")
+      }));
+    });
+
+    it("fails with Error when the Document ID is not a known kikaku document", async () => {
+      currentManaged = managedDocument({
+        documentId: "kikaku-unknown-doc",
+        name: "不明な企画文書",
+        category: "Editor Knowledge",
+        schemaVersion: "editor-knowledge-v1"
+      });
+      vi.mocked(notion.getMarkdown).mockResolvedValue(markdown(KIKAKU_PLAYBOOK_MARKDOWN));
+
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository
+      });
+
+      expect(result).toMatchObject({ status: "failed", reason: "editor_knowledge_document_id_invalid" });
+      expect(repository.activateEditorKnowledgeSectioned).not.toHaveBeenCalled();
+      expect(notion.updateWorkflow).toHaveBeenLastCalledWith(pageId, expect.objectContaining({
+        status: "Error"
+      }));
+    });
+
+    it("does not touch Editor Knowledge repository methods when syncing other categories", async () => {
+      const result = await processSyncMessage(message("page.properties_updated"), {
+        notion,
+        repository,
+        now: () => now
+      });
+
+      expect(result.status).toBe("synced");
+      expect(repository.getEditorKnowledgeSectionedState).not.toHaveBeenCalled();
+      expect(repository.activateEditorKnowledgeSectioned).not.toHaveBeenCalled();
+    });
+  });
+
 });
 
 function managedDocument(
@@ -443,3 +656,33 @@ function authorStyleDocument(
     sections: []
   };
 }
+
+// Representative of what the Notion "page markdown" API is expected to hand back for a kikaku
+// page's blocks: heading text (including the format contract's literal "## N." prefix and the
+// full-width "｜" delimiter) preserved verbatim as plain heading text, not reinterpreted into
+// something else (e.g. an ordered list). These fixtures stand in for that external conversion
+// boundary — see notion.ts's getMarkdown, which calls Notion's own /markdown endpoint.
+const KIKAKU_PLAYBOOK_MARKDOWN = [
+  "# 企画構成プレイブック",
+  "",
+  "## 1. 企画の立て方",
+  "第1章の本文。",
+  "",
+  "## 2. 構成の作り方",
+  "第2章の本文。",
+  ""
+].join("\n");
+
+const KIKAKU_CATALOG_MARKDOWN = [
+  "# 企画カタログ427",
+  "",
+  "## テーマ群A｜EC×D2C戦略",
+  "グループAの概要文。",
+  "",
+  "### No.1 ｜ 最初の企画",
+  "企画1の本文。",
+  "",
+  "### No.2 ｜ 二つ目の企画",
+  "企画2の本文。",
+  ""
+].join("\n");

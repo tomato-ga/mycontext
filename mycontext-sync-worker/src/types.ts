@@ -1,4 +1,5 @@
 import type { LoadedAuthorStyleDocument } from "../../mycontext-sync/src/authorStyle.js";
+import type { LoadedEditorKnowledgeSectionedDocument } from "../../mycontext-sync/src/editorKnowledge.js";
 
 export type WorkflowStatus =
   | "Draft"
@@ -14,6 +15,7 @@ export type SyncCategory =
   | "Personal Context"
   | "AI Skill"
   | "Author Style"
+  | "Editor Knowledge"
   | "Metaskill";
 
 export interface ManagedNotionDocument {
@@ -59,6 +61,10 @@ export interface AuthorStyleState {
   sourcePathKey: string;
 }
 
+export interface EditorKnowledgeSectionedState {
+  activeSectionRevisionSha256: string | null;
+}
+
 export interface SyncRepository {
   appendSyncStateLog(entry: SyncStateLogEntry): Promise<void>;
   syncNotionPage(input: {
@@ -73,6 +79,10 @@ export interface SyncRepository {
     document: LoadedAuthorStyleDocument;
     notionPageId: string;
     expectedState: AuthorStyleState | null;
+  }): Promise<void>;
+  getEditorKnowledgeSectionedState(documentId: string): Promise<EditorKnowledgeSectionedState | null>;
+  activateEditorKnowledgeSectioned(input: {
+    document: LoadedEditorKnowledgeSectionedDocument;
   }): Promise<void>;
 }
 

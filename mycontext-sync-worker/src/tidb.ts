@@ -3,9 +3,14 @@ import type {
   AuthorStyleSection,
   LoadedAuthorStyleDocument
 } from "../../mycontext-sync/src/authorStyle.js";
+import type {
+  EditorKnowledgeSection,
+  LoadedEditorKnowledgeSectionedDocument
+} from "../../mycontext-sync/src/editorKnowledge.js";
 import {
   SyncFailure,
   type AuthorStyleState,
+  type EditorKnowledgeSectionedState,
   type SyncStateLogEntry,
   type SyncRepository
 } from "./types.js";
@@ -200,6 +205,61 @@ export class TidbSyncRepository implements SyncRepository {
     }
   }
 
+  async getEditorKnowledgeSectionedState(
+    documentId: string
+  ): Promise<EditorKnowledgeSectionedState | null> {
+    const rows = await this.execute(
+      `SELECT section_revision_sha256
+       FROM editor_knowledge_documents
+       WHERE document_id = ?
+       LIMIT 1`,
+      [documentId]
+    );
+    if (rows[0] === undefined) return null;
+    return {
+      activeSectionRevisionSha256: optionalString(record(rows[0]).section_revision_sha256)
+    };
+  }
+
+  async activateEditorKnowledgeSectioned(input: {
+    document: LoadedEditorKnowledgeSectionedDocument;
+  }): Promise<void> {
+    const tx = await this.connection.begin();
+    try {
+      await tx.execute(
+        `INSERT INTO editor_knowledge_documents
+          (document_id, title, markdown, markdown_sha256,
+           section_revision_sha256, section_count, search_span_count, last_synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3))
+         ON DUPLICATE KEY UPDATE
+          title = VALUES(title),
+          markdown = VALUES(markdown),
+          markdown_sha256 = VALUES(markdown_sha256),
+          section_revision_sha256 = VALUES(section_revision_sha256),
+          section_count = VALUES(section_count),
+          search_span_count = VALUES(search_span_count),
+          last_synced_at = NOW(3)`,
+        [
+          input.document.documentId,
+          input.document.title,
+          input.document.markdown,
+          input.document.markdownSha256,
+          input.document.sectionRevisionSha256,
+          input.document.sectionCount,
+          input.document.searchSpanCount
+        ]
+      );
+
+      for (const section of input.document.sections) {
+        await upsertEditorKnowledgeSection(tx, section);
+      }
+      await tx.commit();
+    } catch (error) {
+      await safeRollback(tx);
+      throw databaseFailure(error);
+    }
+  }
+
   private async execute(sql: string, params: readonly unknown[] = []): Promise<Row[]> {
     try {
       return await this.connection.execute(sql, [...params]);
@@ -274,6 +334,65 @@ async function insertAuthorStyleRevision(
       document.sectionCount,
       document.deliverySectionCount,
       document.searchSpanCount
+    ]
+  );
+}
+
+async function upsertEditorKnowledgeSection(
+  tx: Tx<{ url: string }>,
+  section: EditorKnowledgeSection
+): Promise<void> {
+  await tx.execute(
+    `INSERT INTO editor_knowledge_sections
+      (document_id, section_id, section_revision_sha256, parent_section_id,
+       delivery_section_id, section_type, heading_level, section_number, title,
+       heading_path_json, content_layer, ordinal, source_line_start,
+       source_line_end, direct_markdown, section_markdown, retrieval_text,
+       content_sha256, is_searchable, related_source_path, freshness_class,
+       last_synced_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
+     ON DUPLICATE KEY UPDATE
+      parent_section_id = VALUES(parent_section_id),
+      delivery_section_id = VALUES(delivery_section_id),
+      section_type = VALUES(section_type),
+      heading_level = VALUES(heading_level),
+      section_number = VALUES(section_number),
+      title = VALUES(title),
+      heading_path_json = VALUES(heading_path_json),
+      content_layer = VALUES(content_layer),
+      ordinal = VALUES(ordinal),
+      source_line_start = VALUES(source_line_start),
+      source_line_end = VALUES(source_line_end),
+      direct_markdown = VALUES(direct_markdown),
+      section_markdown = VALUES(section_markdown),
+      retrieval_text = VALUES(retrieval_text),
+      content_sha256 = VALUES(content_sha256),
+      is_searchable = VALUES(is_searchable),
+      related_source_path = VALUES(related_source_path),
+      freshness_class = VALUES(freshness_class),
+      last_synced_at = NOW(3)`,
+    [
+      section.documentId,
+      section.sectionId,
+      section.sectionRevisionSha256,
+      section.parentSectionId,
+      section.deliverySectionId,
+      section.sectionType,
+      section.headingLevel,
+      section.sectionNumber,
+      section.title,
+      JSON.stringify(section.headingPath),
+      section.contentLayer,
+      section.ordinal,
+      section.sourceLineStart,
+      section.sourceLineEnd,
+      section.directMarkdown,
+      section.sectionMarkdown,
+      section.retrievalText,
+      section.contentSha256,
+      section.isSearchable,
+      section.relatedSourcePath,
+      section.freshnessClass
     ]
   );
 }

@@ -1,10 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { loadEditorKnowledgeSectionedDocument } from "../src/editorKnowledge.js";
+import {
+  loadEditorKnowledgeSectionedDocument,
+  parseEditorKnowledgeSectionedMarkdown
+} from "../src/editorKnowledge.js";
 import {
   writeKikakuCatalogFixture,
   writeKikakuPlaybookFixture,
   writeKikakuSourceFixture
 } from "./fixtures/editorKnowledgeSectionedFixture.js";
+
+describe("parseEditorKnowledgeSectionedMarkdown (text-based, used by mycontext-sync-worker)", () => {
+  it("parses Notion-fetched Markdown text directly, with no file I/O", () => {
+    const markdown = [
+      "# 企画構成プレイブック テスト版",
+      "",
+      "## 1. 企画の立て方",
+      "第1章の本文。",
+      ""
+    ].join("\n");
+
+    const document = parseEditorKnowledgeSectionedMarkdown({
+      documentId: "kikaku-composition-playbook",
+      markdown,
+      sourcePathKey: "notion:abc123"
+    });
+
+    expect(document).toMatchObject({
+      documentId: "kikaku-composition-playbook",
+      title: "企画構成プレイブック テスト版",
+      sourcePathKey: "notion:abc123",
+      sectionCount: 1,
+      searchSpanCount: 1
+    });
+    expect(document.sections[0]).toMatchObject({ sectionId: "chapter-01" });
+  });
+
+  it("produces the exact same result as the file-based loader for identical content", async () => {
+    const fixture = await writeKikakuCatalogFixture();
+    const fromFile = await loadEditorKnowledgeSectionedDocument(fixture.root, fixture.source);
+    const fromText = parseEditorKnowledgeSectionedMarkdown({
+      documentId: fixture.source.documentId,
+      markdown: fixture.markdown,
+      sourcePathKey: fixture.source.relativePath
+    });
+    expect(fromText).toEqual(fromFile);
+  });
+
+  it("rejects empty or NUL-containing Markdown, mirroring the file-based loader's guard", () => {
+    expect(() => parseEditorKnowledgeSectionedMarkdown({
+      documentId: "kikaku-db-catalog",
+      markdown: "   ",
+      sourcePathKey: "notion:abc123"
+    })).toThrow(expect.objectContaining({ code: "editor_knowledge_invalid_markdown" }));
+  });
+});
 
 describe("kikaku composition playbook parsing (editor knowledge, sectioned)", () => {
   it("treats each numbered ## chapter as one atomic, self-delivering detail section", async () => {

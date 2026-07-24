@@ -3,6 +3,10 @@ import {
   AUTHOR_STYLE_ROUTING_VERSION,
   AUTHOR_STYLE_SECTIONING_VERSION
 } from "../../mycontext-sync/src/authorStyle.js";
+import {
+  BUSINESS_KNOWLEDGE_PARSER_VERSION,
+  BUSINESS_KNOWLEDGE_SECTIONING_VERSION
+} from "../../mycontext-sync/src/businessKnowledge.js";
 import { sha256 } from "./hash.js";
 import type {
   ManagedNotionDocument,
@@ -84,6 +88,12 @@ export class SyncStateTrace {
       this.snapshot.parserVersion = AUTHOR_STYLE_PARSER_VERSION;
       this.snapshot.sectioningVersion = AUTHOR_STYLE_SECTIONING_VERSION;
       this.snapshot.routingVersion = AUTHOR_STYLE_ROUTING_VERSION;
+    } else if (managed.category === "Editor Knowledge") {
+      // Editor Knowledge (kikaku-*) sections reuse the Business Knowledge parser/sectioning
+      // machinery unchanged; there is no routing-manifest concept for it, so routingVersion
+      // stays null.
+      this.snapshot.parserVersion = BUSINESS_KNOWLEDGE_PARSER_VERSION;
+      this.snapshot.sectioningVersion = BUSINESS_KNOWLEDGE_SECTIONING_VERSION;
     }
   }
 

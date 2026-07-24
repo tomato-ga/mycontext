@@ -42,6 +42,7 @@ const SYNC_CATEGORIES = new Set<SyncCategory>([
   "Personal Context",
   "AI Skill",
   "Author Style",
+  "Editor Knowledge",
   "Metaskill"
 ]);
 

@@ -53,10 +53,24 @@ export interface EditorKnowledgeSectionedSource {
   relativePath: string;
 }
 
-export const EDITOR_KNOWLEDGE_SECTIONED_SOURCES: readonly EditorKnowledgeSectionedSource[] = [
-  { documentId: "kikaku-composition-playbook", relativePath: "kikaku/composition-playbook.md" },
-  { documentId: "kikaku-db-catalog", relativePath: "kikaku/kikaku-db-catalog.md" }
-];
+/**
+ * Empty: kikaku-composition-playbook and kikaku-db-catalog are no longer synced from local
+ * files. Per the "every document syncs through the Notion MyContext Documents database" rule,
+ * they are Notion-managed pages with Category "Editor Knowledge", synced by
+ * mycontext-sync-worker via parseEditorKnowledgeSectionedMarkdown below (the same pattern
+ * Author Style already uses: mycontext-sync-worker imports the parser directly rather than
+ * this package's file-loading CLI path). This list, and loadEditorKnowledgeSectionedDocument,
+ * are kept only as reusable local-testing infrastructure over the same parsers/section
+ * generation/TiDB schema — pull-editor-knowledge and doctor-editor-knowledge simply iterate
+ * zero sectioned sources now.
+ */
+export const EDITOR_KNOWLEDGE_SECTIONED_SOURCES: readonly EditorKnowledgeSectionedSource[] = [];
+
+export function isEditorKnowledgeSectionedDocumentId(
+  value: string
+): value is EditorKnowledgeSectionedDocumentId {
+  return value === "kikaku-composition-playbook" || value === "kikaku-db-catalog";
+}
 
 export type EditorKnowledgeContentLayer = "summary" | "detail" | "index";
 
@@ -136,7 +150,7 @@ async function readEditorKnowledgeSourceFile(
 
   let markdown: string;
   try {
-    markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+    markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes).replace(/^\uFEFF/, "");
   } catch (error) {
     throw new AppError(
       "editor_knowledge_invalid_utf8",
@@ -171,12 +185,32 @@ export async function loadEditorKnowledgeDocument(
   };
 }
 
-export async function loadEditorKnowledgeSectionedDocument(
-  sourceRoot: string,
-  source: EditorKnowledgeSectionedSource
-): Promise<LoadedEditorKnowledgeSectionedDocument> {
-  const { markdown } = await readEditorKnowledgeSourceFile(sourceRoot, source);
-  const title = extractMarkdownTitle(markdown, source.documentId);
+export interface EditorKnowledgeSectionedMarkdownInput {
+  documentId: EditorKnowledgeSectionedDocumentId;
+  markdown: string;
+  sourcePathKey: string;
+}
+
+/**
+ * Core text-based parser: takes already-fetched Markdown directly (no file I/O), so it works
+ * equally for a local file's contents (see loadEditorKnowledgeSectionedDocument below, a thin
+ * wrapper around this) and for Markdown fetched from a Notion page by mycontext-sync-worker
+ * (see sync.ts's defaultParseEditorKnowledge, which mirrors authorStyle.ts's
+ * parseAuthorStyleMarkdown / loadAuthorStyleDocument split exactly).
+ */
+export function parseEditorKnowledgeSectionedMarkdown(
+  input: EditorKnowledgeSectionedMarkdownInput
+): LoadedEditorKnowledgeSectionedDocument {
+  const { documentId, markdown, sourcePathKey } = input;
+  if (markdown.trim().length === 0 || markdown.includes("\0")) {
+    throw new AppError(
+      "editor_knowledge_invalid_markdown",
+      `editor knowledge source is empty or contains NUL: ${documentId}`,
+      3
+    );
+  }
+
+  const title = extractMarkdownTitle(markdown, documentId);
   const normalizedForParsing = markdown.replace(/\r\n/g, "\n");
   const lines = splitContentLines(normalizedForParsing);
   const markdownSha256 = sha256(markdown);
@@ -184,12 +218,12 @@ export async function loadEditorKnowledgeSectionedDocument(
     `${markdownSha256}\0${BUSINESS_KNOWLEDGE_PARSER_VERSION}\0${BUSINESS_KNOWLEDGE_SECTIONING_VERSION}`
   );
 
-  const parsed = source.documentId === "kikaku-composition-playbook"
+  const parsed = documentId === "kikaku-composition-playbook"
     ? parseKikakuPlaybook(title, lines)
     : parseKikakuCatalog(title, lines);
   const sections: EditorKnowledgeSection[] = parsed.sections.map((section, index) => ({
     ...section,
-    documentId: source.documentId,
+    documentId,
     sectionRevisionSha256,
     ordinal: index + 1,
     contentSha256: sha256(section.sectionMarkdown)
@@ -200,9 +234,9 @@ export async function loadEditorKnowledgeSectionedDocument(
 
   const searchSpanCount = sections.filter((section) => section.isSearchable).length;
   return {
-    documentId: source.documentId,
+    documentId,
     title,
-    sourcePathKey: source.relativePath,
+    sourcePathKey,
     markdown,
     markdownSha256,
     sectionRevisionSha256,
@@ -210,6 +244,18 @@ export async function loadEditorKnowledgeSectionedDocument(
     searchSpanCount,
     sections
   };
+}
+
+export async function loadEditorKnowledgeSectionedDocument(
+  sourceRoot: string,
+  source: EditorKnowledgeSectionedSource
+): Promise<LoadedEditorKnowledgeSectionedDocument> {
+  const { markdown } = await readEditorKnowledgeSourceFile(sourceRoot, source);
+  return parseEditorKnowledgeSectionedMarkdown({
+    documentId: source.documentId,
+    markdown,
+    sourcePathKey: source.relativePath
+  });
 }
 
 function extractMarkdownTitle(markdown: string, documentId: string): string {
