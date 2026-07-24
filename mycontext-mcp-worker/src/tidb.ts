@@ -9,6 +9,7 @@ import {
   type AuthorStyleSelectors
 } from "./authorStyle.js";
 import { buildBusinessKnowledgeSectionUri } from "./businessKnowledge.js";
+import { buildEditorKnowledgeSectionUri } from "./editorKnowledge.js";
 import {
   MetaskillContextTooLargeError,
   buildMetaskillDocumentUri,
@@ -19,6 +20,12 @@ import {
   type MetaskillDocumentId,
   type MetaskillSelectors
 } from "./metaskill.js";
+import {
+  buildSearchQueryPlan,
+  normalizeSearchText,
+  EMPTY_PERSONAL_SYNONYM_CONFIG,
+  type PersonalSynonymConfig
+} from "./searchQuery.js";
 
 export type DocumentSource = "notion" | "editor_knowledge" | "business_knowledge";
 
@@ -45,6 +52,9 @@ export interface SearchContextHit {
   title: string | null;
   text: string;
   match_position: number;
+  matched_terms: string[];
+  score: number;
+  search_stage: "phrase" | "keywords" | "synonyms";
   matched_span_position?: number;
   matched_section_id?: string;
   matched_section_title?: string;
@@ -257,6 +267,32 @@ export interface ListedBusinessKnowledgeResource {
   resource_uri: string;
 }
 
+export interface EditorKnowledgeResource {
+  document_id: string;
+  section_id: string;
+  title: string;
+  heading_path: string[];
+  content_layer: string;
+  markdown: string;
+  source_line_start: number;
+  source_line_end: number;
+  related_source_path: string | null;
+  freshness_class: string | null;
+  resource_uri: string;
+}
+
+export interface ListedEditorKnowledgeResource {
+  document_id: string;
+  section_id: string;
+  title: string;
+  heading_path: string[];
+  content_layer: string;
+  size_bytes: number;
+  related_source_path: string | null;
+  freshness_class: string | null;
+  resource_uri: string;
+}
+
 export class DataShapeError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -303,9 +339,9 @@ const DOCUMENT_READ_MODEL_SQL = `SELECT
         NULL AS ingest_scope,
         NULL AS source_declared_at,
         NULL AS detail_available,
-        NULL AS section_revision_sha256,
-        NULL AS section_count,
-        NULL AS search_span_count,
+        section_revision_sha256,
+        section_count,
+        search_span_count,
         FALSE AS source_truncated,
         JSON_ARRAY() AS unknown_block_ids,
         last_synced_at
@@ -380,19 +416,71 @@ export async function listDocuments(client: TidbClient): Promise<ListedDocument[
   }));
 }
 
-export async function searchContext(client: TidbClient, query: string, topK: number): Promise<SearchContextHit[]> {
+export async function searchContext(
+  client: TidbClient,
+  query: string,
+  topK: number,
+  personalSynonyms: PersonalSynonymConfig = EMPTY_PERSONAL_SYNONYM_CONFIG
+): Promise<SearchContextHit[]> {
   const limitedTopK = validateTopK(topK);
-  const likePattern = buildLikePattern(query);
-  const rows = await client.execute(
+  const plan = buildSearchQueryPlan(query, personalSynonyms);
+  const likePattern = buildLikePattern(plan.phrase);
+  const phraseRows = await client.execute(
     buildSearchSql(limitedTopK),
-    [query, query, likePattern, query, likePattern]
+    [plan.phrase, plan.phrase, likePattern, plan.phrase, plan.phrase, likePattern, plan.phrase, likePattern]
   );
+  if (phraseRows.length > 0) {
+    return phraseRows.map((row) =>
+      enrichSearchHit(parseSearchContextHit(row), [plan.phrase], "phrase", 100)
+    );
+  }
 
-  return rows.map(parseSearchContextHit);
+  if (plan.terms.length > 0) {
+    const keywordRows = await client.execute(
+      buildKeywordSearchSql(plan.terms.length, limitedTopK),
+      buildKeywordSearchParams(plan.terms)
+    );
+    if (keywordRows.length > 0) {
+      return keywordRows.map((row) =>
+        enrichSearchHit(
+          parseSearchContextHit(row),
+          plan.terms,
+          "keywords",
+          parseOptionalNumber(row.search_score) ?? 1
+        )
+      );
+    }
+  }
+
+  const synonymTerms = plan.synonymTerms.filter((term) =>
+    !plan.terms.some((original) => equalSearchText(original, term))
+  );
+  if (synonymTerms.length === 0) {
+    return [];
+  }
+
+  const fallbackTerms = synonymTerms.slice(0, 8);
+  const synonymRows = await client.execute(
+    buildKeywordSearchSql(fallbackTerms.length, limitedTopK),
+    buildKeywordSearchParams(fallbackTerms)
+  );
+  return synonymRows.map((row) =>
+    enrichSearchHit(
+      parseSearchContextHit(row),
+      fallbackTerms,
+      "synonyms",
+      parseOptionalNumber(row.search_score) ?? 1
+    )
+  );
 }
 
-export async function searchText(client: TidbClient, query: string, topK: number): Promise<SearchTextHit[]> {
-  return searchContext(client, query, topK);
+export async function searchText(
+  client: TidbClient,
+  query: string,
+  topK: number,
+  personalSynonyms: PersonalSynonymConfig = EMPTY_PERSONAL_SYNONYM_CONFIG
+): Promise<SearchTextHit[]> {
+  return searchContext(client, query, topK, personalSynonyms);
 }
 
 export async function getDocument(client: TidbClient, documentId: string): Promise<FullDocument | null> {
@@ -505,6 +593,58 @@ export async function getBusinessKnowledgeSection(
     [documentId, sectionId]
   );
   return rows[0] === undefined ? null : parseBusinessKnowledgeResource(rows[0]);
+}
+
+export async function listEditorKnowledgeResources(
+  client: TidbClient
+): Promise<ListedEditorKnowledgeResource[]> {
+  const rows = await client.execute(
+    `SELECT
+        sections.document_id,
+        sections.section_id,
+        sections.title,
+        sections.heading_path_json,
+        sections.content_layer,
+        sections.related_source_path,
+        sections.freshness_class,
+        OCTET_LENGTH(sections.section_markdown) AS size_bytes
+      FROM editor_knowledge_sections AS sections
+      INNER JOIN editor_knowledge_documents AS documents
+        ON documents.document_id = sections.document_id
+       AND documents.section_revision_sha256 = sections.section_revision_sha256
+      WHERE sections.section_id = sections.delivery_section_id
+      ORDER BY sections.document_id ASC, sections.ordinal ASC, sections.section_id ASC`
+  );
+  return rows.map(parseListedEditorKnowledgeResource);
+}
+
+export async function getEditorKnowledgeSection(
+  client: TidbClient,
+  documentId: string,
+  sectionId: string
+): Promise<EditorKnowledgeResource | null> {
+  const rows = await client.execute(
+    `SELECT
+        sections.document_id,
+        sections.section_id,
+        sections.title,
+        sections.heading_path_json,
+        sections.content_layer,
+        sections.section_markdown,
+        sections.source_line_start,
+        sections.source_line_end,
+        sections.related_source_path,
+        sections.freshness_class
+      FROM editor_knowledge_sections AS sections
+      INNER JOIN editor_knowledge_documents AS documents
+        ON documents.document_id = sections.document_id
+       AND documents.section_revision_sha256 = sections.section_revision_sha256
+      WHERE sections.document_id = ?
+        AND sections.section_id = ?
+      LIMIT 1`,
+    [documentId, sectionId]
+  );
+  return rows[0] === undefined ? null : parseEditorKnowledgeResource(rows[0]);
 }
 
 export async function getAuthorStyleContext(
@@ -1207,6 +1347,56 @@ export function buildSearchSql(topK: number): string {
           ) AS delivery_match_rank
         FROM business_span_matches
       ),
+      editor_span_matches AS (
+        SELECT
+          CONCAT('editor-knowledge:', documents.document_id) AS document_id,
+          'editor_knowledge' AS source,
+          documents.document_id AS source_id,
+          documents.title,
+          delivery_sections.section_markdown AS markdown,
+          LOCATE(?, delivery_sections.section_markdown) AS match_position,
+          LOCATE(?, matched_sections.retrieval_text) AS matched_span_position,
+          matched_sections.section_id AS matched_section_id,
+          matched_sections.title AS matched_section_title,
+          matched_sections.content_layer AS matched_content_layer,
+          delivery_sections.section_id AS delivery_section_id,
+          delivery_sections.title AS delivery_section_title,
+          delivery_sections.content_layer AS delivery_content_layer,
+          matched_sections.heading_path_json,
+          matched_sections.source_line_start,
+          matched_sections.source_line_end,
+          delivery_sections.source_line_start AS delivery_line_start,
+          delivery_sections.source_line_end AS delivery_line_end,
+          matched_sections.related_source_path,
+          matched_sections.freshness_class,
+          NULL AS source_kind,
+          NULL AS ingest_scope,
+          NULL AS source_declared_at,
+          NULL AS detail_available,
+          documents.last_synced_at,
+          matched_sections.ordinal AS matched_ordinal,
+          delivery_sections.ordinal AS delivery_ordinal
+        FROM editor_knowledge_documents AS documents
+        INNER JOIN editor_knowledge_sections AS matched_sections
+          ON matched_sections.document_id = documents.document_id
+         AND matched_sections.section_revision_sha256 = documents.section_revision_sha256
+        INNER JOIN editor_knowledge_sections AS delivery_sections
+          ON delivery_sections.document_id = matched_sections.document_id
+         AND delivery_sections.section_id = matched_sections.delivery_section_id
+         AND delivery_sections.section_revision_sha256 = documents.section_revision_sha256
+        WHERE documents.section_revision_sha256 IS NOT NULL
+          AND matched_sections.is_searchable = TRUE
+          AND matched_sections.retrieval_text LIKE ? ESCAPE '\\\\'
+      ),
+      ranked_editor_matches AS (
+        SELECT
+          editor_span_matches.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY source_id, delivery_section_id
+            ORDER BY matched_span_position ASC, matched_ordinal ASC, matched_section_id ASC
+          ) AS delivery_match_rank
+        FROM editor_span_matches
+      ),
       document_matches AS (
         SELECT
           documents.document_id,
@@ -1236,7 +1426,7 @@ export function buildSearchSql(topK: number): string {
           documents.last_synced_at,
           0 AS delivery_ordinal
         FROM (${DOCUMENT_READ_MODEL_SQL}) AS documents
-        WHERE documents.source <> 'business_knowledge'
+        WHERE documents.section_count IS NULL
           AND documents.markdown LIKE ? ESCAPE '\\\\'
       )
       SELECT
@@ -1296,9 +1486,324 @@ export function buildSearchSql(topK: number): string {
           delivery_ordinal
         FROM ranked_business_matches
         WHERE delivery_match_rank = 1
+        UNION ALL
+        SELECT
+          document_id,
+          source,
+          source_id,
+          title,
+          markdown,
+          match_position,
+          matched_span_position,
+          matched_section_id,
+          matched_section_title,
+          matched_content_layer,
+          delivery_section_id,
+          delivery_section_title,
+          delivery_content_layer,
+          heading_path_json,
+          source_line_start,
+          source_line_end,
+          delivery_line_start,
+          delivery_line_end,
+          related_source_path,
+          freshness_class,
+          source_kind,
+          ingest_scope,
+          source_declared_at,
+          detail_available,
+          last_synced_at,
+          delivery_ordinal
+        FROM ranked_editor_matches
+        WHERE delivery_match_rank = 1
       ) AS matches
       ORDER BY last_synced_at DESC, document_id ASC, delivery_ordinal ASC
       LIMIT ${limitedTopK}`;
+}
+
+export function buildKeywordSearchSql(termCount: number, topK: number): string {
+  if (!Number.isInteger(termCount) || termCount < 1 || termCount > 8) {
+    throw new RangeError("termCount must be an integer from 1 to 8");
+  }
+  const limitedTopK = validateTopK(topK);
+  const businessScore = buildTermScoreSql(
+    termCount,
+    "documents.title",
+    "matched_sections.retrieval_text"
+  );
+  const documentScore = buildTermScoreSql(
+    termCount,
+    "documents.title",
+    "documents.markdown"
+  );
+  const businessWhere = buildTermWhereSql(
+    termCount,
+    "documents.title",
+    "matched_sections.retrieval_text"
+  );
+  const documentWhere = buildTermWhereSql(
+    termCount,
+    "documents.title",
+    "documents.markdown"
+  );
+
+  return `WITH business_span_matches AS (
+        SELECT
+          CONCAT('business-knowledge:', documents.document_id) AS document_id,
+          'business_knowledge' AS source,
+          documents.document_id AS source_id,
+          documents.title,
+          delivery_sections.section_markdown AS markdown,
+          1 AS match_position,
+          1 AS matched_span_position,
+          matched_sections.section_id AS matched_section_id,
+          matched_sections.title AS matched_section_title,
+          matched_sections.content_layer AS matched_content_layer,
+          delivery_sections.section_id AS delivery_section_id,
+          delivery_sections.title AS delivery_section_title,
+          delivery_sections.content_layer AS delivery_content_layer,
+          matched_sections.heading_path_json,
+          matched_sections.source_line_start,
+          matched_sections.source_line_end,
+          delivery_sections.source_line_start AS delivery_line_start,
+          delivery_sections.source_line_end AS delivery_line_end,
+          matched_sections.related_source_path,
+          matched_sections.freshness_class,
+          documents.source_kind,
+          documents.ingest_scope,
+          documents.source_declared_at,
+          JSON_UNQUOTE(JSON_EXTRACT(documents.routing_metadata_json, '$.detailAvailable'))
+            AS detail_available,
+          documents.last_synced_at,
+          matched_sections.ordinal AS matched_ordinal,
+          delivery_sections.ordinal AS delivery_ordinal,
+          ${businessScore} AS search_score
+        FROM business_knowledge_documents AS documents
+        INNER JOIN business_knowledge_sections AS matched_sections
+          ON matched_sections.document_id = documents.document_id
+         AND matched_sections.section_revision_sha256 = documents.section_revision_sha256
+        INNER JOIN business_knowledge_sections AS delivery_sections
+          ON delivery_sections.document_id = matched_sections.document_id
+         AND delivery_sections.section_id = matched_sections.delivery_section_id
+         AND delivery_sections.section_revision_sha256 = documents.section_revision_sha256
+        WHERE matched_sections.is_searchable = TRUE
+          AND (${businessWhere})
+      ),
+      ranked_business_matches AS (
+        SELECT
+          business_span_matches.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY source_id, delivery_section_id
+            ORDER BY search_score DESC, matched_ordinal ASC, matched_section_id ASC
+          ) AS delivery_match_rank
+        FROM business_span_matches
+      ),
+      editor_span_matches AS (
+        SELECT
+          CONCAT('editor-knowledge:', documents.document_id) AS document_id,
+          'editor_knowledge' AS source,
+          documents.document_id AS source_id,
+          documents.title,
+          delivery_sections.section_markdown AS markdown,
+          1 AS match_position,
+          1 AS matched_span_position,
+          matched_sections.section_id AS matched_section_id,
+          matched_sections.title AS matched_section_title,
+          matched_sections.content_layer AS matched_content_layer,
+          delivery_sections.section_id AS delivery_section_id,
+          delivery_sections.title AS delivery_section_title,
+          delivery_sections.content_layer AS delivery_content_layer,
+          matched_sections.heading_path_json,
+          matched_sections.source_line_start,
+          matched_sections.source_line_end,
+          delivery_sections.source_line_start AS delivery_line_start,
+          delivery_sections.source_line_end AS delivery_line_end,
+          matched_sections.related_source_path,
+          matched_sections.freshness_class,
+          NULL AS source_kind,
+          NULL AS ingest_scope,
+          NULL AS source_declared_at,
+          NULL AS detail_available,
+          documents.last_synced_at,
+          matched_sections.ordinal AS matched_ordinal,
+          delivery_sections.ordinal AS delivery_ordinal,
+          ${businessScore} AS search_score
+        FROM editor_knowledge_documents AS documents
+        INNER JOIN editor_knowledge_sections AS matched_sections
+          ON matched_sections.document_id = documents.document_id
+         AND matched_sections.section_revision_sha256 = documents.section_revision_sha256
+        INNER JOIN editor_knowledge_sections AS delivery_sections
+          ON delivery_sections.document_id = matched_sections.document_id
+         AND delivery_sections.section_id = matched_sections.delivery_section_id
+         AND delivery_sections.section_revision_sha256 = documents.section_revision_sha256
+        WHERE documents.section_revision_sha256 IS NOT NULL
+          AND matched_sections.is_searchable = TRUE
+          AND (${businessWhere})
+      ),
+      ranked_editor_matches AS (
+        SELECT
+          editor_span_matches.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY source_id, delivery_section_id
+            ORDER BY search_score DESC, matched_ordinal ASC, matched_section_id ASC
+          ) AS delivery_match_rank
+        FROM editor_span_matches
+      ),
+      document_matches AS (
+        SELECT
+          documents.document_id,
+          documents.source,
+          documents.source_id,
+          documents.title,
+          documents.markdown,
+          1 AS match_position,
+          NULL AS matched_span_position,
+          NULL AS matched_section_id,
+          NULL AS matched_section_title,
+          NULL AS matched_content_layer,
+          NULL AS delivery_section_id,
+          NULL AS delivery_section_title,
+          NULL AS delivery_content_layer,
+          JSON_ARRAY() AS heading_path_json,
+          NULL AS source_line_start,
+          NULL AS source_line_end,
+          NULL AS delivery_line_start,
+          NULL AS delivery_line_end,
+          NULL AS related_source_path,
+          NULL AS freshness_class,
+          documents.source_kind,
+          documents.ingest_scope,
+          documents.source_declared_at,
+          documents.detail_available,
+          documents.last_synced_at,
+          0 AS delivery_ordinal,
+          ${documentScore} AS search_score
+        FROM (${DOCUMENT_READ_MODEL_SQL}) AS documents
+        WHERE documents.section_count IS NULL
+          AND (${documentWhere})
+      )
+      SELECT
+        document_id,
+        source,
+        source_id,
+        title,
+        markdown,
+        match_position,
+        matched_span_position,
+        matched_section_id,
+        matched_section_title,
+        matched_content_layer,
+        delivery_section_id,
+        delivery_section_title,
+        delivery_content_layer,
+        heading_path_json,
+        source_line_start,
+        source_line_end,
+        delivery_line_start,
+        delivery_line_end,
+        related_source_path,
+        freshness_class,
+        source_kind,
+        ingest_scope,
+        source_declared_at,
+        detail_available,
+        search_score
+      FROM (
+        SELECT * FROM document_matches
+        UNION ALL
+        SELECT
+          document_id,
+          source,
+          source_id,
+          title,
+          markdown,
+          match_position,
+          matched_span_position,
+          matched_section_id,
+          matched_section_title,
+          matched_content_layer,
+          delivery_section_id,
+          delivery_section_title,
+          delivery_content_layer,
+          heading_path_json,
+          source_line_start,
+          source_line_end,
+          delivery_line_start,
+          delivery_line_end,
+          related_source_path,
+          freshness_class,
+          source_kind,
+          ingest_scope,
+          source_declared_at,
+          detail_available,
+          last_synced_at,
+          delivery_ordinal,
+          search_score
+        FROM ranked_business_matches
+        WHERE delivery_match_rank = 1
+        UNION ALL
+        SELECT
+          document_id,
+          source,
+          source_id,
+          title,
+          markdown,
+          match_position,
+          matched_span_position,
+          matched_section_id,
+          matched_section_title,
+          matched_content_layer,
+          delivery_section_id,
+          delivery_section_title,
+          delivery_content_layer,
+          heading_path_json,
+          source_line_start,
+          source_line_end,
+          delivery_line_start,
+          delivery_line_end,
+          related_source_path,
+          freshness_class,
+          source_kind,
+          ingest_scope,
+          source_declared_at,
+          detail_available,
+          last_synced_at,
+          delivery_ordinal,
+          search_score
+        FROM ranked_editor_matches
+        WHERE delivery_match_rank = 1
+      ) AS matches
+      ORDER BY search_score DESC, last_synced_at DESC, document_id ASC, delivery_ordinal ASC
+      LIMIT ${limitedTopK}`;
+}
+
+export function buildKeywordSearchParams(terms: string[]): string[] {
+  if (terms.length < 1 || terms.length > 8) {
+    throw new RangeError("terms must contain from 1 to 8 items");
+  }
+  const patterns = terms.map(buildLikePattern);
+  return [
+    ...patterns.flatMap((pattern) => [pattern, pattern]), // business_span_matches search_score
+    ...patterns.flatMap((pattern) => [pattern, pattern]), // business_span_matches WHERE
+    ...patterns.flatMap((pattern) => [pattern, pattern]), // editor_span_matches search_score
+    ...patterns.flatMap((pattern) => [pattern, pattern]), // editor_span_matches WHERE
+    ...patterns.flatMap((pattern) => [pattern, pattern]), // document_matches search_score
+    ...patterns.flatMap((pattern) => [pattern, pattern])  // document_matches WHERE
+  ];
+}
+
+function buildTermScoreSql(termCount: number, titleColumn: string, textColumn: string): string {
+  return Array.from({ length: termCount }, () =>
+    `(CASE WHEN ${titleColumn} LIKE ? ESCAPE '\\\\' THEN 3 ELSE 0 END + ` +
+    `CASE WHEN ${textColumn} LIKE ? ESCAPE '\\\\' THEN 1 ELSE 0 END)`
+  ).join(" + ");
+}
+
+function buildTermWhereSql(termCount: number, titleColumn: string, textColumn: string): string {
+  return Array.from(
+    { length: termCount },
+    () => `(${titleColumn} LIKE ? ESCAPE '\\\\' OR ${textColumn} LIKE ? ESCAPE '\\\\')`
+  ).join(" OR ");
 }
 
 function toRecordRow(row: TidbRow): Record<string, unknown> {
@@ -1315,15 +1820,22 @@ function parseSearchContextHit(row: Record<string, unknown>): SearchContextHit {
     source,
     title: parseNullableString(row.title, "title"),
     text: parseRequiredString(row.markdown, "markdown"),
-    match_position: parseNumber(row.match_position, "match_position")
+    match_position: parseNumber(row.match_position, "match_position"),
+    matched_terms: [],
+    score: 0,
+    search_stage: "phrase"
   };
-  if (source !== "business_knowledge") {
+  // document_matches rows (whole-document, non-sectioned fallback) always carry a NULL
+  // delivery_section_id; business_span_matches and editor_span_matches rows never do. This
+  // distinguishes a section hit from a plain document hit regardless of source, so both
+  // Business Knowledge and Editor Knowledge sectioned documents are enriched the same way.
+  if (row.delivery_section_id === null || row.delivery_section_id === undefined) {
     return hit;
   }
 
   const sourceId = parseRequiredString(row.source_id, "source_id");
   const deliverySectionId = parseRequiredString(row.delivery_section_id, "delivery_section_id");
-  return {
+  const sectionedHit: SearchContextHit = {
     ...hit,
     matched_span_position: parseNumber(row.matched_span_position, "matched_span_position"),
     matched_section_id: parseRequiredString(row.matched_section_id, "matched_section_id"),
@@ -1339,12 +1851,62 @@ function parseSearchContextHit(row: Record<string, unknown>): SearchContextHit {
     delivery_line_end: parseNumber(row.delivery_line_end, "delivery_line_end"),
     related_source_path: parseNullableString(row.related_source_path, "related_source_path"),
     freshness_class: parseNullableString(row.freshness_class, "freshness_class"),
+    resource_uri: source === "business_knowledge"
+      ? buildBusinessKnowledgeSectionUri(sourceId, deliverySectionId)
+      : buildEditorKnowledgeSectionUri(sourceId, deliverySectionId)
+  };
+
+  if (source !== "business_knowledge") {
+    // Editor Knowledge sectioned documents (kikaku-*) have no source_kind/ingest_scope/
+    // source_declared_at/detail_available concept; those columns don't exist on
+    // editor_knowledge_documents, so they are intentionally left unset here.
+    return sectionedHit;
+  }
+
+  return {
+    ...sectionedHit,
     source_kind: parseRequiredString(row.source_kind, "source_kind"),
     ingest_scope: parseRequiredString(row.ingest_scope, "ingest_scope"),
     source_declared_at: parseSourceDeclaredAt(row.source_declared_at),
-    detail_available: parseNullableBoolean(row.detail_available, "detail_available"),
-    resource_uri: buildBusinessKnowledgeSectionUri(sourceId, deliverySectionId)
+    detail_available: parseNullableBoolean(row.detail_available, "detail_available")
   };
+}
+
+function enrichSearchHit(
+  hit: SearchContextHit,
+  terms: string[],
+  stage: SearchContextHit["search_stage"],
+  score: number
+): SearchContextHit {
+  const searchableText = normalizeSearchText(
+    [
+      hit.title ?? "",
+      hit.matched_section_title ?? "",
+      hit.delivery_section_title ?? "",
+      ...(hit.heading_path ?? []),
+      hit.text
+    ].join("\n")
+  ).toLocaleLowerCase("ja");
+  const matchedTerms = terms.filter((term) =>
+    searchableText.includes(normalizeSearchText(term).toLocaleLowerCase("ja"))
+  );
+  const contentText = normalizeSearchText(hit.text).toLocaleLowerCase("ja");
+  const positions = matchedTerms
+    .map((term) => contentText.indexOf(normalizeSearchText(term).toLocaleLowerCase("ja")))
+    .filter((position) => position >= 0);
+  const matchPosition = positions.length === 0 ? hit.match_position : Math.min(...positions) + 1;
+  return {
+    ...hit,
+    match_position: matchPosition,
+    matched_terms: matchedTerms,
+    score,
+    search_stage: stage
+  };
+}
+
+function equalSearchText(left: string, right: string): boolean {
+  return normalizeSearchText(left).toLocaleLowerCase("ja") ===
+    normalizeSearchText(right).toLocaleLowerCase("ja");
 }
 
 function parseBusinessKnowledgeResource(row: Record<string, unknown>): BusinessKnowledgeResource {
@@ -1388,6 +1950,42 @@ function parseListedBusinessKnowledgeResource(
     source_declared_at: parseSourceDeclaredAt(row.source_declared_at),
     detail_available: parseNullableBoolean(row.detail_available, "detail_available"),
     resource_uri: buildBusinessKnowledgeSectionUri(documentId, sectionId)
+  };
+}
+
+function parseEditorKnowledgeResource(row: Record<string, unknown>): EditorKnowledgeResource {
+  const documentId = parseRequiredString(row.document_id, "document_id");
+  const sectionId = parseRequiredString(row.section_id, "section_id");
+  return {
+    document_id: documentId,
+    section_id: sectionId,
+    title: parseRequiredString(row.title, "title"),
+    heading_path: parseStringArray(row.heading_path_json, "heading_path_json"),
+    content_layer: parseRequiredString(row.content_layer, "content_layer"),
+    markdown: parseRequiredString(row.section_markdown, "section_markdown"),
+    source_line_start: parseNumber(row.source_line_start, "source_line_start"),
+    source_line_end: parseNumber(row.source_line_end, "source_line_end"),
+    related_source_path: parseNullableString(row.related_source_path, "related_source_path"),
+    freshness_class: parseNullableString(row.freshness_class, "freshness_class"),
+    resource_uri: buildEditorKnowledgeSectionUri(documentId, sectionId)
+  };
+}
+
+function parseListedEditorKnowledgeResource(
+  row: Record<string, unknown>
+): ListedEditorKnowledgeResource {
+  const documentId = parseRequiredString(row.document_id, "document_id");
+  const sectionId = parseRequiredString(row.section_id, "section_id");
+  return {
+    document_id: documentId,
+    section_id: sectionId,
+    title: parseRequiredString(row.title, "title"),
+    heading_path: parseStringArray(row.heading_path_json, "heading_path_json"),
+    content_layer: parseRequiredString(row.content_layer, "content_layer"),
+    size_bytes: parseNumber(row.size_bytes, "size_bytes"),
+    related_source_path: parseNullableString(row.related_source_path, "related_source_path"),
+    freshness_class: parseNullableString(row.freshness_class, "freshness_class"),
+    resource_uri: buildEditorKnowledgeSectionUri(documentId, sectionId)
   };
 }
 
@@ -1526,6 +2124,16 @@ function parseNumber(value: unknown, fieldName: string): number {
     }
   }
   throw new DataShapeError(`${fieldName} must be a number`);
+}
+
+function parseOptionalNumber(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function parseNullableNumber(value: unknown, fieldName: string): number | null {

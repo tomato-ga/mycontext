@@ -1,6 +1,13 @@
 import type { AuthRequest, ClientInfo } from "@cloudflare/workers-oauth-provider";
 import { constantTimeEqual } from "./auth.js";
-import { GITHUB_CALLBACK_URL, MCP_RESOURCE, MCP_ROUTE, MCP_SCOPE, PUBLIC_ORIGIN } from "./constants.js";
+import {
+  GITHUB_CALLBACK_URL,
+  MCP_RESOURCE,
+  MCP_ROUTE,
+  MCP_SCOPE,
+  OFFLINE_ACCESS_SCOPE,
+  PUBLIC_ORIGIN
+} from "./constants.js";
 import { ConfigError, loadAuthConfig, type Env } from "./config.js";
 import { jsonResponse, withSecurityHeaders } from "./http.js";
 
@@ -151,7 +158,7 @@ async function finishGitHubAuthorization(request: Request, env: Env): Promise<Re
       login: user.login,
       clientName: session.clientName
     },
-    scope: [MCP_SCOPE],
+    scope: session.oauthRequest.scope.filter((scope) => ALLOWED_SCOPES.has(scope)),
     props: {
       identityProvider: "github",
       userId: user.id,
@@ -211,8 +218,13 @@ async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> {
   return { id: data.id, login: data.login };
 }
 
-function validateRequestedScope(request: AuthRequest): void {
-  if (!request.scope.includes(MCP_SCOPE) || request.scope.some((scope) => scope !== MCP_SCOPE)) {
+const ALLOWED_SCOPES = new Set([MCP_SCOPE, OFFLINE_ACCESS_SCOPE]);
+
+export function validateRequestedScope(request: AuthRequest): void {
+  if (
+    !request.scope.includes(MCP_SCOPE) ||
+    request.scope.some((scope) => !ALLOWED_SCOPES.has(scope))
+  ) {
     throw new Error("Unsupported OAuth scope");
   }
 }

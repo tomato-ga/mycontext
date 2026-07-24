@@ -71,12 +71,12 @@ export interface LoadedBusinessKnowledgeDocument {
   sections: BusinessKnowledgeSection[];
 }
 
-interface ParsedSectionInput extends Omit<
+export interface ParsedSectionInput extends Omit<
   BusinessKnowledgeSection,
   "documentId" | "sectionRevisionSha256" | "ordinal" | "contentSha256"
 > {}
 
-interface ParsedDocumentSections {
+export interface ParsedDocumentSections {
   sections: ParsedSectionInput[];
   outline: Record<string, unknown>;
   routingMetadata: Record<string, unknown>;
@@ -457,6 +457,204 @@ function parseMarketingWisdom(documentTitle: string, lines: string[]): ParsedDoc
   };
 }
 
+/**
+ * Shared with editorKnowledge.ts: the kikaku composition playbook and kikaku DB catalog are
+ * modeled as sectioned Editor Knowledge documents, not Business Knowledge documents, but they
+ * reuse this exact parsing/validation/error-code machinery unchanged.
+ */
+export function parseKikakuPlaybook(documentTitle: string, lines: string[]): ParsedDocumentSections {
+  const headings = scanMarkdownHeadings(lines);
+  const chapterHeadings = headings.filter((heading) => heading.level === 2);
+  if (chapterHeadings.length === 0) {
+    throw new AppError(
+      "kikaku_playbook_no_chapters",
+      "kikaku composition playbook must contain at least one ## chapter heading",
+      3
+    );
+  }
+  assertNumberedHeadings(chapterHeadings, /^(\d+)\.\s/, chapterHeadings.length, "kikaku playbook chapters");
+
+  const sections: ParsedSectionInput[] = [];
+  const outlineChapters: Array<{ key: string; title: string; number: number }> = [];
+  for (let index = 0; index < chapterHeadings.length; index += 1) {
+    const heading = chapterHeadings[index];
+    const nextLine = chapterHeadings[index + 1]?.line ?? lines.length + 1;
+    const number = Number(/^(\d+)\./.exec(heading.title)?.[1]);
+    const sectionId = `chapter-${twoDigits(number)}`;
+    const headingPath = [documentTitle, heading.title];
+    const markdown = sliceLines(lines, heading.line, nextLine - 1);
+    outlineChapters.push({ key: sectionId, title: heading.title, number });
+    sections.push({
+      sectionId,
+      parentSectionId: null,
+      deliverySectionId: sectionId,
+      sectionType: "markdown_heading",
+      headingLevel: 2,
+      sectionNumber: String(number),
+      title: heading.title,
+      headingPath,
+      contentLayer: "detail",
+      sourceLineStart: heading.line,
+      sourceLineEnd: nextLine - 1,
+      directMarkdown: markdown,
+      sectionMarkdown: markdown,
+      retrievalText: contextualize(headingPath, markdown),
+      isSearchable: true,
+      relatedSourcePath: null,
+      freshnessClass: "static_framework"
+    });
+  }
+
+  return {
+    sections,
+    outline: { chapters: outlineChapters },
+    routingMetadata: { defaultRetrieval: "direct", detailAvailable: false }
+  };
+}
+
+const KIKAKU_CATALOG_MAX_GROUPS = 10;
+const KIKAKU_CATALOG_GROUP_LETTERS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] as const;
+const KIKAKU_CATALOG_ENTRY_PATTERN = /^No\.(?:(\d+)|なし-(\d+))\s*｜\s*(.+)$/;
+
+/** Shared with editorKnowledge.ts, see parseKikakuPlaybook. */
+export function parseKikakuCatalog(documentTitle: string, lines: string[]): ParsedDocumentSections {
+  const headings = scanMarkdownHeadings(lines);
+  const structuralHeadings = headings.filter((heading) => heading.level === 2 || heading.level === 3);
+  const disallowed = headings.find((heading) => {
+    return heading.level !== 1 && heading.level !== 2 && heading.level !== 3;
+  });
+  if (disallowed !== undefined) {
+    throw new AppError(
+      "kikaku_catalog_heading_level_invalid",
+      `kikaku db catalog only allows ## group and ### entry headings, found level ${disallowed.level} heading "${disallowed.title}"`,
+      3
+    );
+  }
+  if (structuralHeadings.length === 0) {
+    throw new AppError(
+      "kikaku_catalog_no_entries",
+      "kikaku db catalog must contain at least one ### entry heading",
+      3
+    );
+  }
+  if (structuralHeadings[0].level !== 2) {
+    throw new AppError(
+      "kikaku_catalog_orphan_entry",
+      "kikaku db catalog must begin with a ## group heading before any ### entry",
+      3
+    );
+  }
+
+  const groupHeadings = structuralHeadings.filter((heading) => heading.level === 2);
+  if (groupHeadings.length > KIKAKU_CATALOG_MAX_GROUPS) {
+    throw new AppError(
+      "kikaku_catalog_too_many_groups",
+      `kikaku db catalog expected at most ${KIKAKU_CATALOG_MAX_GROUPS} group headings, got ${groupHeadings.length}`,
+      3
+    );
+  }
+  const entryHeadings = structuralHeadings.filter((heading) => heading.level === 3);
+
+  const sections: ParsedSectionInput[] = [];
+  const outlineGroups: Array<{ key: string; title: string; entryCount: number }> = [];
+  let totalEntries = 0;
+
+  for (let groupIndex = 0; groupIndex < groupHeadings.length; groupIndex += 1) {
+    const groupHeading = groupHeadings[groupIndex];
+    const groupEnd = groupHeadings[groupIndex + 1]?.line ?? lines.length + 1;
+    const groupKey = `group-${KIKAKU_CATALOG_GROUP_LETTERS[groupIndex]}`;
+    const groupPath = [documentTitle, groupHeading.title];
+    const childEntryHeadings = entryHeadings.filter((heading) => {
+      return heading.line > groupHeading.line && heading.line < groupEnd;
+    });
+    const firstChildLine = childEntryHeadings[0]?.line ?? groupEnd;
+    const groupDirectMarkdown = sliceLines(lines, groupHeading.line, firstChildLine - 1);
+    const groupSectionMarkdown = sliceLines(lines, groupHeading.line, groupEnd - 1);
+
+    sections.push({
+      sectionId: groupKey,
+      parentSectionId: null,
+      deliverySectionId: groupKey,
+      sectionType: "markdown_heading",
+      headingLevel: 2,
+      sectionNumber: null,
+      title: groupHeading.title,
+      headingPath: groupPath,
+      contentLayer: "index",
+      sourceLineStart: groupHeading.line,
+      sourceLineEnd: groupEnd - 1,
+      directMarkdown: groupDirectMarkdown,
+      sectionMarkdown: groupSectionMarkdown,
+      retrievalText: contextualize(groupPath, groupDirectMarkdown),
+      isSearchable: false,
+      relatedSourcePath: null,
+      freshnessClass: "static_framework"
+    });
+
+    for (let entryIndex = 0; entryIndex < childEntryHeadings.length; entryIndex += 1) {
+      const entryHeading = childEntryHeadings[entryIndex];
+      const entryEnd = childEntryHeadings[entryIndex + 1]?.line ?? groupEnd;
+      const parsedEntry = parseKikakuCatalogEntryHeading(entryHeading.title);
+      const sectionId = parsedEntry.numbered
+        ? `no-${threeDigits(parsedEntry.number)}`
+        : `x-${twoDigits(parsedEntry.number)}`;
+      const entryPath = [...groupPath, entryHeading.title];
+      const entryMarkdown = sliceLines(lines, entryHeading.line, entryEnd - 1);
+      sections.push({
+        sectionId,
+        parentSectionId: null,
+        deliverySectionId: sectionId,
+        sectionType: "markdown_heading",
+        headingLevel: 3,
+        sectionNumber: parsedEntry.numbered ? String(parsedEntry.number) : null,
+        title: entryHeading.title,
+        headingPath: entryPath,
+        contentLayer: "detail",
+        sourceLineStart: entryHeading.line,
+        sourceLineEnd: entryEnd - 1,
+        directMarkdown: entryMarkdown,
+        sectionMarkdown: entryMarkdown,
+        retrievalText: entryMarkdown,
+        isSearchable: true,
+        relatedSourcePath: null,
+        freshnessClass: "dated_example"
+      });
+      totalEntries += 1;
+    }
+
+    outlineGroups.push({ key: groupKey, title: groupHeading.title, entryCount: childEntryHeadings.length });
+  }
+
+  if (totalEntries === 0) {
+    throw new AppError(
+      "kikaku_catalog_no_entries",
+      "kikaku db catalog must contain at least one ### entry heading",
+      3
+    );
+  }
+
+  return {
+    sections,
+    outline: { groups: outlineGroups, entryCount: totalEntries },
+    routingMetadata: { defaultRetrieval: "direct", detailAvailable: true }
+  };
+}
+
+function parseKikakuCatalogEntryHeading(title: string): { numbered: boolean; number: number } {
+  const match = KIKAKU_CATALOG_ENTRY_PATTERN.exec(title);
+  if (match === null) {
+    throw new AppError(
+      "kikaku_catalog_entry_heading_invalid",
+      `kikaku db catalog entry heading must match "No.<n> ｜ title" or "No.なし-<n> ｜ title", got "${title}"`,
+      3
+    );
+  }
+  if (match[1] !== undefined) {
+    return { numbered: true, number: Number(match[1]) };
+  }
+  return { numbered: false, number: Number(match[2]) };
+}
+
 function scanMarkdownHeadings(lines: string[]): MarkdownHeading[] {
   const headings: MarkdownHeading[] = [];
   let fenceMarker: "```" | "~~~" | null = null;
@@ -478,7 +676,7 @@ function scanMarkdownHeadings(lines: string[]): MarkdownHeading[] {
   return headings;
 }
 
-function splitContentLines(markdown: string): string[] {
+export function splitContentLines(markdown: string): string[] {
   const lines = markdown.split("\n");
   if (lines[lines.length - 1] === "") {
     lines.pop();
@@ -612,7 +810,24 @@ function twoDigits(value: number): string {
   return String(value).padStart(2, "0");
 }
 
-function assertUniqueSectionIds(sections: BusinessKnowledgeSection[]): void {
+function threeDigits(value: number): string {
+  return String(value).padStart(3, "0");
+}
+
+/** Structural subset shared with editorKnowledge.ts, see parseKikakuPlaybook. */
+export interface SectionIdentity {
+  documentId: string;
+  sectionId: string;
+}
+
+/** Structural subset shared with editorKnowledge.ts, see parseKikakuPlaybook. */
+export interface SectionStorageContent extends SectionIdentity {
+  directMarkdown: string;
+  sectionMarkdown: string;
+  retrievalText: string;
+}
+
+export function assertUniqueSectionIds(sections: SectionIdentity[]): void {
   const ids = new Set<string>();
   for (const section of sections) {
     if (ids.has(section.sectionId)) {
@@ -626,9 +841,9 @@ function assertUniqueSectionIds(sections: BusinessKnowledgeSection[]): void {
   }
 }
 
-function assertStorageLimits(
+export function assertStorageLimits(
   markdown: string,
-  sections: BusinessKnowledgeSection[]
+  sections: SectionStorageContent[]
 ): void {
   assertMediumText("document markdown", markdown);
   for (const section of sections) {

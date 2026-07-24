@@ -1,0 +1,25 @@
+{
+  "name": "mycontext-sync-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "@tidbcloud/serverless": "^0.3.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.2",
+    "vite": "^8.1.3",
+    "vitest": "^4.1.10",
+    "wrangler": "4.33.2"
+  }
+}

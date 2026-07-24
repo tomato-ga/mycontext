@@ -2,7 +2,7 @@
 
 `mycontext-mcp` は、Notion とローカル Markdown に置いている個人コンテキストを AI クライアントから読めるようにするための小さな同期基盤です。
 
-Notion の対象ページを Markdown として TiDB に保存し、Cloudflare Workers 上の Remote MCP server から読み取り専用で公開します。Obsidian へは必要に応じてローカルで Markdown export します。
+Notion の対象ページを Markdown として TiDB に保存し、Cloudflare Workers 上の Remote MCP server から読み取り専用で公開します。人間が継続編集する文書は、Notionの`Ready`を起点に同期専用Workerから自動反映できます。Obsidianや緊急バックアップへは必要に応じてローカルでMarkdown exportします。
 
 ## 全体像
 
@@ -10,6 +10,9 @@ Notion の対象ページを Markdown として TiDB に保存し、Cloudflare W
 Notion pages
   -> mycontext-sync
   -> TiDB notion_pages
+Notion MyContext Documents (Status = Ready)
+  -> mycontext-sync-worker webhook + Queue
+  -> validated TiDB revisions / sections
 noteAI editor knowledge Markdown
   -> mycontext-sync
   -> TiDB editor_knowledge_documents
@@ -32,19 +35,20 @@ TiDB notion_pages
   -> Obsidian _notion_pages/
 ```
 
-このプロジェクトは「Notion 全体を検索できる巨大な RAG」ではなく、必要なページと固定ローカルMarkdownだけを同期する設計です。Notionとeditor knowledgeは1文書1行で保存し、business knowledge・author style・Metaskillは文字数ではなく原文の意味境界で保存します。embedding、ローカル MCP server、Worker 側の Notion API 呼び出しは持ちません。
+このプロジェクトは「Notion 全体を検索できる巨大な RAG」ではなく、明示的に管理対象としたページと固定ローカルMarkdownだけを同期する設計です。Notionとeditor knowledgeは1文書1行で保存し、business knowledge・author style・Metaskillは文字数ではなく原文の意味境界で保存します。embeddingとローカルMCP serverは持ちません。公開MCP WorkerはNotion APIを呼ばず、同期専用WorkerだけがNotion APIとTiDB writerを使用します。
 
 ## コンポーネント
 
 | Path | 役割 |
 | --- | --- |
 | `mycontext-sync/` | Notionと固定ローカルコーパスを用途別テーブルへ保存する TypeScript CLI。TiDB から Obsidian へ Notion Markdownをexportするコマンドも持つ。 |
+| `mycontext-sync-worker/` | Notionの`Ready`をWebhookとQueueで受け、検証済みrevisionだけをTiDBへ反映する非公開同期Worker。 |
 | `mycontext-mcp-worker/` | TiDB の文書、意味section、選択式context packを公開する Cloudflare Workers Remote MCP server。既存 `/mcp` はOAuth 2.1保護、`/healthz` は公開liveness endpoint。 |
 | `docs/` | 記事企画や運用メモなど、プロジェクト横断の資料。 |
 
 ## 個人利用と公開repoの分離
 
-個人の Notion pageId/title、ローカルMarkdown同期元の絶対パス、Notion API key、TiDB credentials、OAuth secretsは公開repoに入れません。ローカルでは `mycontext-sync/.env` の `MIRROR_CONFIG_JSON` / `EDITOR_KNOWLEDGE_SOURCE_ROOT` / `BUSINESS_KNOWLEDGE_SOURCE_ROOT` / `AUTHOR_STYLE_SOURCE_ROOT` / `METASKILL_SOURCE_ROOT` と、Worker用の `.dev.vars` / Wrangler secrets で管理します。
+個人の Notion pageId/title、ローカルMarkdown同期元の絶対パス、Notion API key、TiDB credentials、OAuth secretsは公開repoに入れません。ローカルでは `mycontext-sync/.env` の `MIRROR_CONFIG_JSON` / `EDITOR_KNOWLEDGE_SOURCE_ROOT` / `BUSINESS_KNOWLEDGE_SOURCE_ROOT` / `AUTHOR_STYLE_SOURCE_ROOT` / `METASKILL_SOURCE_ROOT` と、各Worker用の `.dev.vars` / Wrangler secrets で管理します。
 
 詳細は [docs/personal-use.md](docs/personal-use.md) を参照してください。push前には次を実行できます。
 
@@ -189,6 +193,8 @@ metaskill_sections(
 
 Obsidian export は Notion API を呼びません。TiDB に保存済みの内容をローカルファイルへ反映するだけです。
 
+Notionを人間向け正本にする自動同期は`mycontext-sync-worker/README.md`を参照してください。Statusが`Ready`になったページだけを処理し、失敗時はactive revisionを維持します。
+
 ## Remote MCP
 
 `mycontext-mcp-worker` は Cloudflare Workers 上で動く読み取り専用 MCP server です。
@@ -291,6 +297,29 @@ curl -i http://localhost:8787/mcp
 
 `/healthz` は `200 ok`、token なしの `/mcp` は `401` が期待値です。
 
+### Notion Sync Worker
+
+`mycontext-sync-worker`は公開MCP Workerと別のcredentialで動作します。Notion webhook、Cloudflare Queue、15分ごとのreconciliation、TiDB writerを持ちます。
+
+```bash
+cd mycontext-sync-worker
+pnpm install
+pnpm run typecheck
+pnpm test
+pnpm exec wrangler deploy --dry-run
+```
+
+Notion data sourceのプロパティ、Queue作成、secret、初回Webhook検証は[専用README](mycontext-sync-worker/README.md)を参照してください。
+
+緊急Markdownは通常同期に使わず、TiDB active revisionのexportと明示的restoreだけに限定します。
+
+```bash
+cd mycontext-sync
+pnpm export-author-style-markdown -- --document-id ore-body-style
+pnpm restore-author-style-markdown -- --document-id ore-body-style \
+  --input-path /private/path/snapshot.md --dry-run
+```
+
 ## 開発チェック
 
 各サブプロジェクトで実行します。
@@ -324,7 +353,7 @@ pnpm doctor-author-style
 - Business検索は最小sectionで行い、AIへは`delivery_section_id`が示す意味完結した親sectionを返す（Small2Big）。
 - Business同期は新規2テーブルと固定2文書IDだけへUPSERTし、`DELETE`/`TRUNCATE`/`DROP`を持たない。
 - Author styleは3専用テーブルへ細粒度保存するが、AIにはWorkerが選択・結合した1コンテキストパックを返す。通常経路で全文や任意文字chunkを読ませない。
-- Worker は read-only にする。書き込み、migration、Notion API 取得は CLI 側に閉じる。
+- 公開MCP Workerはread-onlyにする。Notion APIとTiDB書き込みは、credentialを分離した同期CLIまたは同期専用Workerに閉じる。
 - Obsidian は Worker から直接触らず、ローカル export と launchd で扱う。
 - embedding や chunk table は、必要性が確認できるまで入れない。
 

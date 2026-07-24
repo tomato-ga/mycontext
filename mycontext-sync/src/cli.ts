@@ -5,16 +5,22 @@ import { runDoctorAuthorStyle } from "./commands/doctorAuthorStyle.js";
 import { runDoctorEditorKnowledge } from "./commands/doctorEditorKnowledge.js";
 import { runDoctorMetaskill } from "./commands/doctorMetaskill.js";
 import { runExportObsidian } from "./commands/exportObsidian.js";
+import { runExportAuthorStyleMarkdown } from "./commands/exportAuthorStyleMarkdown.js";
+import { runRestoreAuthorStyleMarkdown } from "./commands/restoreAuthorStyleMarkdown.js";
+import { runPreflightAuthorStyleNotion } from "./commands/preflightAuthorStyleNotion.js";
 import { runMigrate } from "./commands/migrate.js";
 import { runMigrateBusinessKnowledge } from "./commands/migrateBusinessKnowledge.js";
+import { runMigrateEditorKnowledge } from "./commands/migrateEditorKnowledge.js";
 import { runMigrateAuthorStyle } from "./commands/migrateAuthorStyle.js";
 import { runMigrateMetaskill } from "./commands/migrateMetaskill.js";
+import { runMigrateSyncStateLog } from "./commands/migrateSyncStateLog.js";
 import { runPull } from "./commands/pull.js";
 import { runPullBusinessKnowledge } from "./commands/pullBusinessKnowledge.js";
 import { runPullAuthorStyle } from "./commands/pullAuthorStyle.js";
 import { runPullEditorKnowledge } from "./commands/pullEditorKnowledge.js";
 import { runPullMetaskill } from "./commands/pullMetaskill.js";
 import { runSearch } from "./commands/search.js";
+import { runAuditSyncState } from "./commands/auditSyncState.js";
 import { AppError, errorMessage, type CliFlags } from "./types.js";
 
 try {
@@ -33,11 +39,17 @@ try {
     case "migrate-business-knowledge":
       await runMigrateBusinessKnowledge(flags);
       break;
+    case "migrate-editor-knowledge":
+      await runMigrateEditorKnowledge(flags);
+      break;
     case "migrate-author-style":
       await runMigrateAuthorStyle(flags);
       break;
     case "migrate-metaskill":
       await runMigrateMetaskill(flags);
+      break;
+    case "migrate-sync-state-log":
+      await runMigrateSyncStateLog(flags);
       break;
     case "pull-business-knowledge":
       await runPullBusinessKnowledge(flags);
@@ -66,8 +78,20 @@ try {
     case "export-obsidian":
       await runExportObsidian(flags);
       break;
+    case "export-author-style-markdown":
+      await runExportAuthorStyleMarkdown(flags);
+      break;
+    case "restore-author-style-markdown":
+      await runRestoreAuthorStyleMarkdown(flags);
+      break;
+    case "preflight-author-style-notion":
+      await runPreflightAuthorStyleNotion(flags);
+      break;
     case "search":
       await runSearch(flags);
+      break;
+    case "audit-sync-state":
+      await runAuditSyncState(flags);
       break;
     default:
       throw new AppError("unknown_command", `unknown command: ${command ?? "(missing)"}`, 3);
@@ -86,6 +110,7 @@ export function parseFlags(args: string[]): CliFlags {
     config: "mirror.config.json",
     dryRun: false,
     reindex: false,
+    activateEmergency: false,
     topK: 5
   };
 
@@ -122,6 +147,18 @@ export function parseFlags(args: string[]): CliFlags {
         break;
       case "--output-dir":
         flags.outputDir = requireValue(args, ++index, "--output-dir");
+        break;
+      case "--document-id":
+        flags.documentId = requireValue(args, ++index, "--document-id");
+        break;
+      case "--input-path":
+        flags.inputPath = requireValue(args, ++index, "--input-path");
+        break;
+      case "--output-path":
+        flags.outputPath = requireValue(args, ++index, "--output-path");
+        break;
+      case "--activate-emergency":
+        flags.activateEmergency = true;
         break;
       default:
         throw new AppError("unknown_flag", `unknown flag: ${arg ?? "(missing)"}`, 3);

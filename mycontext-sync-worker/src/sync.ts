@@ -1,0 +1,456 @@
+import {
+  AUTHOR_STYLE_SOURCES,
+  parseAuthorStyleMarkdown,
+  type LoadedAuthorStyleDocument
+} from "../../mycontext-sync/src/authorStyle.js";
+import { sha256 } from "./hash.js";
+import { SyncStateTrace } from "./stateLog.js";
+import {
+  SyncFailure,
+  type ManagedNotionDocument,
+  type NotionGateway,
+  type NotionMarkdown,
+  type SyncMessage,
+  type SyncOutcome,
+  type SyncRepository
+} from "./types.js";
+
+export interface SyncDependencies {
+  notion: NotionGateway;
+  repository: SyncRepository;
+  parseAuthorStyle?: (input: {
+    managed: ManagedNotionDocument;
+    markdown: string;
+  }) => LoadedAuthorStyleDocument;
+  now?: () => Date;
+  deliveryAttempt?: number;
+}
+
+const EXPECTED_SCHEMA_VERSION = {
+  "Personal Context": "personal-context-v1",
+  "AI Skill": "ai-skill-v1",
+  "Author Style": "author-style-v1",
+  "Metaskill": "metaskill-v1"
+} as const;
+
+export async function processSyncMessage(
+  message: SyncMessage,
+  dependencies: SyncDependencies
+): Promise<SyncOutcome> {
+  const trace = new SyncStateTrace(
+    message,
+    dependencies.repository,
+    dependencies.deliveryAttempt ?? 1,
+    dependencies.now
+  );
+  await trace.record("received");
+  try {
+    return await handleNotionChange(message.pageId, dependencies, trace);
+  } catch (error) {
+    const failure = normalizeFailure(error);
+    await trace.recordFailure(failure);
+    throw failure;
+  }
+}
+
+async function handleReadyPage(
+  pageId: string,
+  dependencies: SyncDependencies,
+  trace: SyncStateTrace,
+  initialManaged?: ManagedNotionDocument
+): Promise<SyncOutcome> {
+  let managed: ManagedNotionDocument;
+  try {
+    managed = initialManaged ?? await dependencies.notion.getManagedDocument(pageId);
+  } catch (error) {
+    const failure = normalizeFailure(error);
+    if (failure.retryable) throw failure;
+    if (failure.code === "notion_data_source_mismatch") {
+      await trace.record("ignored", {
+        validationStatus: "not_applicable",
+        errorCode: failure.code,
+        errorMessage: failure.message,
+        retryable: false,
+        nextAction: "none"
+      });
+      return { pageId, status: "ignored", reason: failure.code };
+    }
+    await dependencies.notion.updateWorkflow(pageId, {
+      status: failure.workflowStatus,
+      validationError: `${failure.code}: ${failure.message}`
+    });
+    await trace.recordFailure(failure);
+    return { pageId, status: "failed", reason: failure.code };
+  }
+  trace.captureManaged(managed);
+  if (managed.status !== "Ready" && managed.status !== "Syncing") {
+    await trace.record("ignored", {
+      validationStatus: "not_applicable",
+      nextAction: "none",
+      details: { reason: managed.status }
+    });
+    return { pageId, documentId: managed.documentId, status: "ignored", reason: managed.status };
+  }
+
+  try {
+    validateManagedDocument(managed);
+    const owners = await dependencies.notion.findByDocumentId(managed.documentId);
+    if (owners.length !== 1 || owners[0]?.pageId !== managed.pageId) {
+      throw new SyncFailure(
+        "notion_document_id_duplicate",
+        `Document ID must identify exactly one page: ${managed.documentId}`,
+        { workflowStatus: "Conflict" }
+      );
+    }
+    await trace.record("eligible", {
+      validationStatus: "passed",
+      nextAction: "load_and_verify_source",
+      details: {
+        schemaVersion: managed.schemaVersion,
+        lastEditedTime: managed.lastEditedTime
+      }
+    });
+    if (managed.status === "Ready") {
+      await dependencies.notion.updateWorkflow(pageId, {
+        status: "Syncing",
+        validationError: null
+      });
+    }
+    await trace.record("syncing", {
+      workflowStatus: "Syncing",
+      nextAction: "load_and_verify_source",
+      details: { resumed: managed.status === "Syncing" }
+    });
+
+    const first = await dependencies.notion.getMarkdown(pageId);
+    validateMarkdown(first);
+    const firstFingerprint = syncFingerprint(managed, first.markdown);
+
+    const second = await dependencies.notion.getMarkdown(pageId);
+    validateMarkdown(second);
+    const refreshed = await dependencies.notion.getManagedDocument(pageId);
+    validateManagedDocument(refreshed);
+    if (refreshed.status !== "Syncing") {
+      throw new SyncFailure(
+        "notion_status_changed_during_sync",
+        `Notion Status changed to ${refreshed.status} while synchronization was running`,
+        { workflowStatus: "Conflict" }
+      );
+    }
+    const secondFingerprint = syncFingerprint(refreshed, second.markdown);
+    const secondHash = sha256(second.markdown);
+    if (firstFingerprint !== secondFingerprint) {
+      throw new SyncFailure(
+        "notion_content_changed_during_sync",
+        "Notion content or management properties changed while synchronization was running; review it and set Ready again",
+        { workflowStatus: "Conflict" }
+      );
+    }
+    trace.captureManaged(refreshed);
+    trace.captureSource({
+      inputFingerprint: secondFingerprint,
+      sourceMarkdownSha256: secondHash
+    });
+    await trace.record("source_verified", {
+      workflowStatus: "Syncing",
+      validationStatus: "passed",
+      nextAction: "validate_content",
+      details: {
+        markdownBytes: new TextEncoder().encode(second.markdown).byteLength,
+        unknownBlockCount: second.unknownBlockIds.length
+      }
+    });
+
+    const prepared = refreshed.category === "Author Style"
+      ? (dependencies.parseAuthorStyle ?? defaultParseAuthorStyle)({
+          managed: refreshed,
+          markdown: second.markdown
+        })
+      : null;
+
+    if (prepared !== null) {
+      trace.captureCandidate({
+        candidateRevisionSha256: prepared.revisionSha256,
+        parserVersion: prepared.parserVersion,
+        sectioningVersion: prepared.sectioningVersion,
+        routingVersion: prepared.routingVersion
+      });
+      await trace.record("content_validated", {
+        validationStatus: "passed",
+        nextAction: "persist_read_model",
+        details: {
+          sectionCount: prepared.sectionCount,
+          deliverySectionCount: prepared.deliverySectionCount,
+          searchSpanCount: prepared.searchSpanCount
+        }
+      });
+    } else {
+      trace.captureCandidate({ candidateRevisionSha256: secondHash });
+      await trace.record("content_validated", {
+        validationStatus: "passed",
+        nextAction: "persist_read_model",
+        details: {
+          documentKind: refreshed.category === "AI Skill"
+            ? "ai_skill"
+            : "personal_context"
+        }
+      });
+    }
+
+    const outcome = refreshed.category === "Author Style"
+      ? await syncAuthorStyle(refreshed, requirePrepared(prepared), dependencies.repository)
+      : await syncPersonalContext(refreshed, second.markdown, secondHash, dependencies.repository);
+
+    if (outcome.status === "synced") {
+      await trace.record("persisted", {
+        nextAction: "update_notion_workflow",
+        details: { resultStatus: outcome.status }
+      });
+    }
+
+    await dependencies.notion.updateWorkflow(pageId, {
+      status: "Synced",
+      syncedHash: secondFingerprint,
+      activeRevision: outcome.revisionSha256 ?? secondHash,
+      validationError: null,
+      lastSyncedAt: (dependencies.now?.() ?? new Date()).toISOString()
+    });
+    await trace.record(outcome.status === "skipped" ? "skipped" : "synced", {
+      workflowStatus: "Synced",
+      validationStatus: "passed",
+      retryable: false,
+      nextAction: "none",
+      details: { resultStatus: outcome.status }
+    });
+    return outcome;
+  } catch (error) {
+    const failure = normalizeFailure(error);
+    if (failure.retryable) throw failure;
+    await dependencies.notion.updateWorkflow(pageId, {
+      status: failure.workflowStatus,
+      validationError: `${failure.code}: ${failure.message}`
+    });
+    await trace.recordFailure(failure);
+    return {
+      pageId,
+      documentId: managed.documentId,
+      status: "failed",
+      reason: failure.code
+    };
+  }
+}
+
+async function handleNotionChange(
+  pageId: string,
+  dependencies: SyncDependencies,
+  trace: SyncStateTrace
+): Promise<SyncOutcome> {
+  let managed: ManagedNotionDocument;
+  try {
+    managed = await dependencies.notion.getManagedDocument(pageId);
+  } catch (error) {
+    const failure = normalizeFailure(error);
+    if (failure.retryable) throw failure;
+    if (failure.code === "notion_data_source_mismatch") {
+      await trace.record("ignored", {
+        validationStatus: "not_applicable",
+        errorCode: failure.code,
+        errorMessage: failure.message,
+        retryable: false,
+        nextAction: "none"
+      });
+      return { pageId, status: "ignored", reason: failure.code };
+    }
+    await dependencies.notion.updateWorkflow(pageId, {
+      status: failure.workflowStatus,
+      validationError: `${failure.code}: ${failure.message}`
+    });
+    await trace.recordFailure(failure);
+    return { pageId, status: "failed", reason: failure.code };
+  }
+  trace.captureManaged(managed);
+  if (managed.status !== "Ready" && managed.status !== "Syncing") {
+    await trace.record("ignored", {
+      validationStatus: "not_applicable",
+      nextAction: "none",
+      details: { reason: managed.status }
+    });
+    return { pageId, documentId: managed.documentId, status: "ignored", reason: managed.status };
+  }
+  return handleReadyPage(pageId, dependencies, trace, managed);
+}
+
+async function syncPersonalContext(
+  managed: ManagedNotionDocument,
+  markdown: string,
+  markdownSha256: string,
+  repository: SyncRepository
+): Promise<SyncOutcome> {
+  await repository.syncNotionPage({
+    pageId: managed.pageId,
+    originalPageId: managed.originalPageId,
+    title: managed.name,
+    markdown,
+    markdownSha256
+  });
+  return {
+    pageId: managed.pageId,
+    documentId: managed.documentId,
+    status: "synced",
+    revisionSha256: markdownSha256
+  };
+}
+
+async function syncAuthorStyle(
+  managed: ManagedNotionDocument,
+  document: LoadedAuthorStyleDocument,
+  repository: SyncRepository
+): Promise<SyncOutcome> {
+  const state = await repository.getAuthorStyleState(managed.documentId);
+  const expectedSourceKey = `notion:${managed.pageId}`;
+
+  if (state !== null && state.sourcePathKey.startsWith("notion:")
+    && state.sourcePathKey !== expectedSourceKey) {
+    throw new SyncFailure(
+      "author_style_owned_by_another_notion_page",
+      `${managed.documentId} is already owned by another Notion page`,
+      { workflowStatus: "Conflict" }
+    );
+  }
+
+  if (
+    state?.activeRevisionSha256 === document.revisionSha256
+    && state.sourcePathKey === expectedSourceKey
+  ) {
+    return {
+      pageId: managed.pageId,
+      documentId: managed.documentId,
+      status: "skipped",
+      revisionSha256: document.revisionSha256
+    };
+  }
+
+  await repository.activateAuthorStyle({
+    document,
+    notionPageId: managed.pageId,
+    expectedState: state
+  });
+  return {
+    pageId: managed.pageId,
+    documentId: managed.documentId,
+    status: "synced",
+    revisionSha256: document.revisionSha256
+  };
+}
+
+function validateManagedDocument(managed: ManagedNotionDocument): void {
+  if (!managed.active) {
+    throw new SyncFailure("notion_document_inactive", "Active must be enabled before syncing");
+  }
+  const expected = EXPECTED_SCHEMA_VERSION[managed.category];
+  if (managed.schemaVersion !== expected) {
+    throw new SyncFailure(
+      "notion_schema_version_invalid",
+      `${managed.category} requires Schema Version ${expected}`
+    );
+  }
+  if (managed.category === "Metaskill") {
+    throw new SyncFailure(
+      "metaskill_snapshot_read_only",
+      "Metaskill pages are TiDB-managed snapshots and cannot be synchronized from Notion",
+      { workflowStatus: "Conflict" }
+    );
+  }
+  if (managed.syncSource !== "Notion") {
+    throw new SyncFailure(
+      "notion_sync_source_invalid",
+      "Sync Source must be Notion for automatic synchronization",
+      { workflowStatus: "Conflict" }
+    );
+  }
+}
+
+function validateMarkdown(value: NotionMarkdown): void {
+  if (value.markdown.trim().length === 0 || value.markdown.includes("\0")) {
+    throw new SyncFailure("notion_markdown_invalid", "Notion Markdown is empty or contains NUL");
+  }
+  if (value.truncated || value.unknownBlockIds.length > 0) {
+    throw new SyncFailure(
+      "notion_markdown_incomplete",
+      `Notion Markdown is incomplete (truncated=${value.truncated}, unknown_blocks=${value.unknownBlockIds.length})`
+    );
+  }
+}
+
+function defaultParseAuthorStyle(input: {
+  managed: ManagedNotionDocument;
+  markdown: string;
+}): LoadedAuthorStyleDocument {
+  const source = AUTHOR_STYLE_SOURCES.find(
+    (candidate) => candidate.documentId === input.managed.documentId
+  );
+  if (source === undefined) {
+    throw new SyncFailure(
+      "author_style_document_id_invalid",
+      "Author Style Document ID must be ore-title-style or ore-body-style"
+    );
+  }
+  try {
+    const canonicalMarkdown = canonicalAuthorStyleMarkdown(input.managed, input.markdown);
+    return parseAuthorStyleMarkdown({
+      source,
+      markdown: canonicalMarkdown,
+      sourcePathKey: `notion:${input.managed.pageId}`,
+      sourceMtimeMs: Date.parse(input.managed.lastEditedTime)
+    });
+  } catch (error) {
+    throw new SyncFailure(
+      "author_style_validation_failed",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+export function syncFingerprint(
+  managed: ManagedNotionDocument,
+  markdown: string
+): string {
+  return sha256(JSON.stringify({
+    fingerprintVersion: 1,
+    pageId: managed.pageId,
+    documentId: managed.documentId,
+    name: managed.name,
+    category: managed.category,
+    active: managed.active,
+    schemaVersion: managed.schemaVersion,
+    syncSource: managed.syncSource,
+    originalPageId: managed.originalPageId,
+    markdown
+  }));
+}
+
+export function canonicalAuthorStyleMarkdown(
+  managed: Pick<ManagedNotionDocument, "name">,
+  markdown: string
+): string {
+  if (/^#(?!#)\s+\S/m.test(markdown)) return markdown;
+  return `# ${managed.name}\n\n${markdown}`;
+}
+
+function requirePrepared(
+  value: LoadedAuthorStyleDocument | null
+): LoadedAuthorStyleDocument {
+  if (value === null) {
+    throw new SyncFailure("author_style_not_prepared", "Author Style was not parsed");
+  }
+  return value;
+}
+
+function normalizeFailure(error: unknown): SyncFailure {
+  if (error instanceof SyncFailure) return error;
+  return new SyncFailure(
+    "sync_unexpected_failure",
+    error instanceof Error ? error.message : String(error),
+    { retryable: true }
+  );
+}

@@ -48,7 +48,10 @@ describe("syncAuthorStyleDocument", () => {
 
   it("skips an already active immutable revision", async () => {
     const writer: AuthorStyleWriter = {
-      getAuthorStyleDocumentRevision: vi.fn().mockResolvedValue(document.revisionSha256),
+      getAuthorStyleDocumentState: vi.fn().mockResolvedValue({
+        activeRevisionSha256: document.revisionSha256,
+        sourcePathKey: source.relativePath
+      }),
       upsertAuthorStyleDocumentAndSections: vi.fn()
     };
 
@@ -64,7 +67,10 @@ describe("syncAuthorStyleDocument", () => {
 
   it("writes and activates the revision when reindex is requested", async () => {
     const writer: AuthorStyleWriter = {
-      getAuthorStyleDocumentRevision: vi.fn().mockResolvedValue(document.revisionSha256),
+      getAuthorStyleDocumentState: vi.fn().mockResolvedValue({
+        activeRevisionSha256: document.revisionSha256,
+        sourcePathKey: source.relativePath
+      }),
       upsertAuthorStyleDocumentAndSections: vi.fn()
     };
 
@@ -76,5 +82,24 @@ describe("syncAuthorStyleDocument", () => {
       reindex: true
     })).resolves.toMatchObject({ status: "synced", dbIndexed: true });
     expect(writer.upsertAuthorStyleDocumentAndSections).toHaveBeenCalledWith(document);
+  });
+
+  it("refuses to overwrite a document whose source is managed by Notion", async () => {
+    const writer: AuthorStyleWriter = {
+      getAuthorStyleDocumentState: vi.fn().mockResolvedValue({
+        activeRevisionSha256: document.revisionSha256,
+        sourcePathKey: "notion:page-1"
+      }),
+      upsertAuthorStyleDocumentAndSections: vi.fn()
+    };
+
+    await expect(syncAuthorStyleDocument({
+      sourceRoot: "/tmp/source",
+      source,
+      tidbClient: writer,
+      dryRun: false,
+      reindex: false
+    })).rejects.toMatchObject({ code: "author_style_source_owned_by_notion" });
+    expect(writer.upsertAuthorStyleDocumentAndSections).not.toHaveBeenCalled();
   });
 });

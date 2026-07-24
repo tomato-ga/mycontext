@@ -1,73 +1,35 @@
-import type { CallToolResult, ContentBlock } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { SearchContextHit } from "../tidb.js";
 
-const MAX_TEXT_LENGTH = 1_500;
+const MAX_SNIPPET_LENGTH = 600;
 
 export function buildSearchToolResult(hits: SearchContextHit[]): CallToolResult {
   const results = hits.map((hit) => ({
-    ...hit,
-    text: hit.source === "business_knowledge"
-      ? hit.text
-      : excerpt(hit.text, hit.match_position, MAX_TEXT_LENGTH)
+    id: stableResultId(hit),
+    title: hit.delivery_section_title ?? hit.title ?? hit.document_id,
+    documentId: hit.document_id,
+    source: hit.source,
+    snippet: excerpt(hit.text, hit.match_position, MAX_SNIPPET_LENGTH),
+    matchedTerms: hit.matched_terms,
+    score: hit.score,
+    searchStage: hit.search_stage
   }));
   const output = { results };
-  const content: ContentBlock[] = [{
-    type: "text",
-    text: JSON.stringify(output, null, 2)
-  }];
-
-  const emittedResources = new Set<string>();
-  for (const result of results) {
-    if (
-      result.source !== "business_knowledge"
-      || result.resource_uri === undefined
-      || result.delivery_section_id === undefined
-    ) {
-      continue;
-    }
-    if (emittedResources.has(result.resource_uri)) {
-      continue;
-    }
-    emittedResources.add(result.resource_uri);
-    content.push(
-      {
-        type: "resource",
-        resource: {
-          uri: result.resource_uri,
-          mimeType: "text/markdown",
-          text: result.text,
-          _meta: {
-            matchedSectionId: result.matched_section_id,
-            matchedContentLayer: result.matched_content_layer,
-            deliverySectionId: result.delivery_section_id,
-            deliveryContentLayer: result.delivery_content_layer,
-            sourceKind: result.source_kind,
-            ingestScope: result.ingest_scope,
-            sourceDeclaredAt: result.source_declared_at,
-            detailAvailable: result.detail_available,
-            relatedSourcePath: result.related_source_path,
-            freshnessClass: result.freshness_class
-          }
-        }
-      },
-      {
-        type: "resource_link",
-        uri: result.resource_uri,
-        name: `${result.document_id}#${result.delivery_section_id}`,
-        title: result.delivery_section_title,
-        description: result.heading_path?.join(" > "),
-        mimeType: "text/markdown",
-        _meta: {
-          sourceDeclaredAt: result.source_declared_at,
-          ingestScope: result.ingest_scope,
-          detailAvailable: result.detail_available,
-          relatedSourcePath: result.related_source_path
-        }
-      }
-    );
-  }
-
-  return { content, structuredContent: output };
+  const text = results.length === 0
+    ? "No synced personal context matched this question."
+    : [
+        `Found ${results.length} personal-context result(s).`,
+        ...results.map((result, index) => [
+          `${index + 1}. ${result.title}`,
+          `id: ${result.id}`,
+          `matched: ${result.matchedTerms.join(", ") || "(fallback match)"}`,
+          result.snippet
+        ].join("\n"))
+      ].join("\n\n");
+  return {
+    content: [{ type: "text", text }],
+    structuredContent: output
+  };
 }
 
 export function excerpt(text: string, matchPosition: number, maxLength: number): string {
@@ -77,4 +39,11 @@ export function excerpt(text: string, matchPosition: number, maxLength: number):
   const prefix = start > 0 ? "..." : "";
   const suffix = end < text.length ? "..." : "";
   return `${prefix}${text.slice(start, end)}${suffix}`;
+}
+
+function stableResultId(hit: SearchContextHit): string {
+  if (hit.delivery_section_id !== undefined) {
+    return `${hit.document_id}#${hit.delivery_section_id}`;
+  }
+  return hit.document_id;
 }

@@ -1,39 +1,31 @@
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp";
-import { MCP_RESOURCE, MCP_ROUTE, MCP_SCOPE, PUBLIC_ORIGIN } from "./constants.js";
+import {
+  MCP_RESOURCE,
+  MCP_ROUTE,
+  MCP_SCOPE,
+  OFFLINE_ACCESS_SCOPE,
+  PUBLIC_ORIGIN
+} from "./constants.js";
 import { ConfigError, loadConfig, type AppConfig, type Env } from "./config.js";
 import { jsonResponse, withSecurityHeaders } from "./http.js";
-import { withOpenAiToolDescriptors } from "./mcpCompatibility.js";
+import { inspectMcpRequest, withOpenAiToolDescriptors } from "./mcpCompatibility.js";
 import { defaultHandler } from "./oauth.js";
 import { registerBusinessKnowledgeResources } from "./resources/businessKnowledge.js";
+import { registerEditorKnowledgeResources } from "./resources/editorKnowledge.js";
 import { registerAuthorStyleResources } from "./resources/authorStyle.js";
 import { registerMetaskillResources } from "./resources/metaskill.js";
 import { createTidbClient } from "./tidb.js";
-import { registerGetDocumentTool } from "./tools/getDocument.js";
-import { registerHealthCheckTool } from "./tools/healthCheck.js";
-import { registerListDocumentsTool } from "./tools/listDocuments.js";
-import { registerSearchContextTool } from "./tools/searchContext.js";
-import { registerSearchTextTool } from "./tools/searchText.js";
-import { registerGetAuthorStyleContextTool } from "./tools/getAuthorStyleContext.js";
-import { registerSearchAuthorStyleEvidenceTool } from "./tools/searchAuthorStyleEvidence.js";
-import { registerGetMetaskillContextTool } from "./tools/getMetaskillContext.js";
-import { registerSearchMetaskillEvidenceTool } from "./tools/searchMetaskillEvidence.js";
+import { registerPublicTools } from "./tools/register.js";
 
 function createServer(config: AppConfig): McpServer {
-  const server = new McpServer({ name: "mycontext-mcp", version: "0.4.0" });
+  const server = new McpServer({ name: "mycontext-mcp", version: "0.5.0" });
   const client = createTidbClient(config.tidbDatabaseUrl);
 
-  registerListDocumentsTool(server, client);
-  registerSearchContextTool(server, client);
-  registerSearchTextTool(server, client);
-  registerGetDocumentTool(server, client);
-  registerHealthCheckTool(server, client);
-  registerGetAuthorStyleContextTool(server, client);
-  registerSearchAuthorStyleEvidenceTool(server, client);
-  registerGetMetaskillContextTool(server, client);
-  registerSearchMetaskillEvidenceTool(server, client);
+  registerPublicTools(server, client, config.personalSynonyms);
   registerBusinessKnowledgeResources(server, client);
+  registerEditorKnowledgeResources(server, client);
   registerAuthorStyleResources(server, client);
   registerMetaskillResources(server, client);
 
@@ -42,6 +34,9 @@ function createServer(config: AppConfig): McpServer {
 
 const apiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const startedAt = Date.now();
+    const requestId = crypto.randomUUID();
+    const inspection = await inspectMcpRequest(request);
     let config: AppConfig;
     try {
       config = loadConfig(env);
@@ -57,7 +52,18 @@ const apiHandler = {
       route: MCP_ROUTE,
       enableJsonResponse: true
     })(request, env, ctx);
-    return withSecurityHeaders(await withOpenAiToolDescriptors(response));
+    const finalResponse = withSecurityHeaders(
+      await withOpenAiToolDescriptors(response, inspection.includesToolsList)
+    );
+    console.log("mcp_request", JSON.stringify({
+      request_id: requestId,
+      cf_ray: request.headers.get("cf-ray"),
+      jsonrpc_method: inspection.methods.join(",") || null,
+      tool_name: inspection.toolName,
+      total_duration_ms: Date.now() - startedAt,
+      status_code: finalResponse.status
+    }));
+    return finalResponse;
   }
 };
 
@@ -68,7 +74,7 @@ const oauthProvider = new OAuthProvider<Env>({
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/oauth/token",
   clientRegistrationEndpoint: "/oauth/register",
-  scopesSupported: [MCP_SCOPE],
+  scopesSupported: [MCP_SCOPE, OFFLINE_ACCESS_SCOPE],
   allowImplicitFlow: false,
   allowPlainPKCE: false,
   allowTokenExchangeGrant: false,
@@ -79,7 +85,7 @@ const oauthProvider = new OAuthProvider<Env>({
   resourceMetadata: {
     resource: MCP_RESOURCE,
     authorization_servers: [PUBLIC_ORIGIN],
-    scopes_supported: [MCP_SCOPE],
+    scopes_supported: [MCP_SCOPE, OFFLINE_ACCESS_SCOPE],
     bearer_methods_supported: ["header"],
     resource_name: "mycontext-mcp"
   },

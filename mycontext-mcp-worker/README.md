@@ -21,10 +21,12 @@ endpoint at `/healthz`.
   Worker-side `UNION ALL` read model; author style and Metaskill remain on
   dedicated retrieval paths.
 - Search:
-  - `search_context`: plain-text LIKE search over full Notion/editor Markdown;
-    business knowledge searches the smallest semantic spans and expands each
-    hit to its complete delivery section (Small2Big).
-  - `search_text`: explicit LIKE fallback alias for exact terms and debugging.
+  - `search_personal_context`: tries the full normalized phrase first, then
+    extracts up to eight Japanese terms for title-weighted OR ranking, and
+    finally retries a bounded synonym set. Business knowledge searches the
+    smallest semantic spans and returns a stable ID for its delivery section.
+  - Search results are compact candidates. Use `read_context` with the returned
+    stable ID for detailed Markdown.
 - Auth: OAuth 2.1 authorization code flow with S256 PKCE. Cloudflare's OAuth
   provider issues and validates MCP access and refresh tokens.
 - Identity: GitHub OAuth is used only to authenticate the resource owner. Access
@@ -34,7 +36,9 @@ endpoint at `/healthz`.
   metadata (including the path-aware `/mcp` document), and standard dynamic
   client registration (DCR). CIMD is intentionally disabled so clients use the
   broadly compatible public-client + PKCE flow.
-- Scope: all tools require `context:read` and are marked read-only.
+- Scope: all tools require `context:read` and are marked read-only. OAuth
+  discovery also advertises `offline_access` so ChatGPT can retain refresh
+  access explicitly.
 - `/healthz`: public and returns only `ok`.
 
 The Worker does not call the Notion API, does not read or write Obsidian files,
@@ -42,11 +46,8 @@ does not run migrations, and does not expose a raw SQL tool.
 
 ## Tools
 
-- `list_documents`
-- `search_context`
-- `search_text`
-- `get_document`
-- `health_check`
+- `search_personal_context`
+- `read_context`
 - `get_author_style_context`: normal generation/edit/evaluation path; returns
   one selector-specific context pack without truncating semantic sections.
 - `search_author_style_evidence`: audit path over evidence/profile/ops layers;
@@ -56,11 +57,11 @@ does not run migrations, and does not expose a raw SQL tool.
 - `search_metaskill_evidence`: fine-grained search path for terms, examples,
   prompts, and supporting passages; hits expand to complete delivery sections.
 
-Document IDs are namespaced as `notion:<page-id>` and
+General document IDs are namespaced as `notion:<page-id>` and
 `editor-knowledge:<document-id>` or `business-knowledge:<document-id>`.
-`get_document` accepts exactly one of the legacy Notion-only `pageId`, unified
-`documentId`, or semantic `sectionId` in
-`business-knowledge:<document-id>#<local-section-id>` format.
+Business search results use
+`business-knowledge:<document-id>#<local-section-id>`. `read_context` accepts
+exactly one stable `id` copied from a search result.
 
 ## Resources
 
@@ -77,17 +78,18 @@ Active semantic sections use this template:
 mycontext://business-knowledge/{documentId}/sections/{sectionId}
 ```
 
-Search results retain text and structured output, and business hits also carry
-an embedded Markdown resource plus a resource link. Only section rows whose
+Search returns a short text summary and compact structured candidates without
+duplicating full Markdown. `read_context` returns Markdown once in text content
+and metadata separately. Only section rows whose
 `section_revision_sha256` matches the owning document are visible. Business
 results and resources expose `source_kind`, `ingest_scope`,
 `source_declared_at`, `detail_available`, content layers, freshness, and any
 relative `related_source_path`, so an index-only source is not mistaken for
 stored detail.
 
-`health_check` counts actual active-revision section rows and actual searchable
-rows. It does not trust the document-level declared counts; inability to read
-the section table therefore reports `db: "error"`.
+The public `/healthz` endpoint remains available for liveness monitoring.
+Administrative document listing and database health helpers are not exposed as
+ChatGPT tools.
 
 Author-style full-source audit resources are available at:
 
@@ -141,6 +143,17 @@ If real credentials were ever shared in prompts, attachments, logs, or committed
 files, rotate the TiDB password and OAuth app secret before using this endpoint
 in production.
 
+`PERSONAL_SYNONYMS` is an optional secret that personalizes `search_personal_context`'s
+term-alias and synonym-fallback expansion (see `src/searchQuery.ts`). It is a JSON string
+shaped like `{"termAliases":{"<nickname>":{"aliases":["<full name>"],"suppressOriginalTerm":true}},"synonymGroups":[["<term>","<synonym>",...]]}`
+— `suppressOriginalTerm: true` drops the matched term itself and keeps only its aliases (useful
+for a short nickname that should always resolve to a fuller, unambiguous form); omit it to keep
+both. Because this value routinely encodes names and other personal facts, it must never be
+committed to `wrangler.jsonc`'s `vars` (which is tracked by git) or to `.dev.vars.example` —
+only to a local, gitignored `.dev.vars` and to the deployed Worker's secrets, as shown below. If
+it is unset, missing, or fails to parse, `search_personal_context` still works correctly and
+simply performs no synonym expansion; a parse failure is logged as a warning, never a crash.
+
 ## Deploy
 
 ```bash
@@ -150,6 +163,7 @@ wrangler secret put TIDB_DATABASE_URL
 wrangler secret put GITHUB_CLIENT_ID
 wrangler secret put GITHUB_CLIENT_SECRET
 wrangler secret put GITHUB_ALLOWED_USER_ID
+wrangler secret put PERSONAL_SYNONYMS   # optional; see Environment above
 
 pnpm run deploy
 ```

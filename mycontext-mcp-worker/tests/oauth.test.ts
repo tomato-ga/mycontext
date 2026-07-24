@@ -5,7 +5,8 @@ import {
   buildGitHubAuthorizeUrl,
   escapeHtml,
   isAllowedGitHubUser,
-  readCookie
+  readCookie,
+  validateRequestedScope
 } from "../src/oauth.js";
 
 describe("OAuth helpers", () => {
@@ -57,5 +58,29 @@ describe("OAuth helpers", () => {
     expect(escapeHtml(`<script>alert("x")</script>`)).toBe(
       "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"
     );
+  });
+
+  it("accepts offline access while requiring context:read", () => {
+    const baseRequest = {
+      responseType: "code",
+      clientId: "client-123",
+      redirectUri: "https://chatgpt.com/connector/oauth/callback",
+      state: "state-456",
+      codeChallenge: "challenge-789",
+      codeChallengeMethod: "S256" as const,
+      resource: "https://mycontext-mcp.servicedake.workers.dev/mcp"
+    };
+    expect(() => validateRequestedScope({
+      ...baseRequest,
+      scope: ["context:read", "offline_access"]
+    })).not.toThrow();
+    expect(() => validateRequestedScope({
+      ...baseRequest,
+      scope: ["offline_access"]
+    })).toThrow("Unsupported OAuth scope");
+    expect(() => validateRequestedScope({
+      ...baseRequest,
+      scope: ["context:read", "admin"]
+    })).toThrow("Unsupported OAuth scope");
   });
 });

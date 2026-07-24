@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   loadAuthorStyleDocument,
+  parseAuthorStyleMarkdown,
   type AuthorStyleSource
 } from "../src/authorStyle.js";
 import {
@@ -75,9 +76,41 @@ describe("author style semantic storage", () => {
       sectionType: "search_span",
       deliverySectionId: "flow"
     });
+    expect(document.sections.find((section) => section.contextKey === "ore-body/longform/contract"))
+      .toMatchObject({
+        sectionType: "delivery",
+        headingLevel: 3,
+        title: "21.9 longform"
+      });
+    expect(document.sections.find((section) => section.contextKey === "ore-body/ops/references"))
+      .toMatchObject({
+        sectionType: "delivery",
+        headingLevel: 2,
+        title: "22. Chapter 22"
+      });
+    expect(document.parserVersion).toBe("author-style-parser-v2");
     expect(packs).toHaveLength(320);
     expect(packs.every((pack) => pack.contextChars <= manifest.maxContextChars)).toBe(true);
     expect(packs.every((pack) => new Set(pack.contextKeys).size === pack.contextKeys.length)).toBe(true);
+  });
+
+  it("parses Notion-provided Markdown without requiring a local file", () => {
+    const source: AuthorStyleSource = {
+      documentId: "ore-title-style",
+      authorKey: "ore",
+      styleScope: "title",
+      relativePath: "knowledge/title.md"
+    };
+    const document = parseAuthorStyleMarkdown({
+      source,
+      markdown: titleMarkdown(),
+      sourcePathKey: "notion:page-1",
+      sourceMtimeMs: 123
+    });
+
+    expect(document.sourcePathKey).toBe("notion:page-1");
+    expect(document.sourceMtimeMs).toBe(123);
+    expect(document.deliverySectionCount).toBe(19);
   });
 });
 
@@ -136,7 +169,7 @@ function bodyMarkdown(): string {
       }
     }
     if (chapter === 12) lines.push("### 12.1 child", "", "Flow evidence.", "");
-    if (chapter === 22) {
+    if (chapter === 21) {
       for (let child = 1; child <= 11; child += 1) {
         lines.push(`### 21.${child} longform`, "", `Longform ${child}.`, "");
       }

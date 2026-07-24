@@ -66,6 +66,10 @@ export interface CliFlags {
   topK: number;
   vaultPath?: string;
   outputDir?: string;
+  documentId?: string;
+  inputPath?: string;
+  outputPath?: string;
+  activateEmergency: boolean;
 }
 
 export class AppError extends Error {

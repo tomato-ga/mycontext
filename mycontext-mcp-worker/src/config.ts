@@ -1,11 +1,16 @@
 import { z } from "zod";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { parsePersonalSynonymConfig, type PersonalSynonymConfig } from "./searchQuery.js";
 
 export interface Env {
   TIDB_DATABASE_URL: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
   GITHUB_ALLOWED_USER_ID: string;
+  // Optional. A JSON-encoded PersonalSynonymConfig (see searchQuery.ts). Set as a Wrangler
+  // secret, never as a `vars` entry in wrangler.jsonc (which is committed). When unset, search
+  // performs no personal synonym expansion — this is a safe, fully-functional default.
+  PERSONAL_SYNONYMS?: string;
   OAUTH_KV: KVNamespace;
   AUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
@@ -13,6 +18,7 @@ export interface Env {
 
 export interface AppConfig {
   tidbDatabaseUrl: string;
+  personalSynonyms: PersonalSynonymConfig;
 }
 
 export interface AuthConfig {
@@ -32,7 +38,8 @@ export type EnvStringKey =
   | "TIDB_DATABASE_URL"
   | "GITHUB_CLIENT_ID"
   | "GITHUB_CLIENT_SECRET"
-  | "GITHUB_ALLOWED_USER_ID";
+  | "GITHUB_ALLOWED_USER_ID"
+  | "PERSONAL_SYNONYMS";
 
 export type EnvSource = Partial<Record<EnvStringKey, string>>;
 
@@ -52,7 +59,11 @@ export function loadConfig(env: EnvSource): AppConfig {
   const values = validateEnv(appEnvSchema, env);
 
   return {
-    tidbDatabaseUrl: values.TIDB_DATABASE_URL
+    tidbDatabaseUrl: values.TIDB_DATABASE_URL,
+    // Optional and validated leniently on its own: a missing or malformed PERSONAL_SYNONYMS
+    // secret must never prevent the worker from starting, it should just disable synonym
+    // expansion.
+    personalSynonyms: parsePersonalSynonymConfig(env.PERSONAL_SYNONYMS)
   };
 }
 

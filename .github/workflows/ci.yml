@@ -45,3 +45,25 @@ jobs:
         working-directory: mycontext-mcp-worker
       - run: pnpm test
         working-directory: mycontext-mcp-worker
+
+  mycontext-sync-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: mycontext-sync-worker/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: mycontext-sync-worker
+      - run: ./scripts/check-public-safety.sh
+      - run: pnpm run typecheck
+        working-directory: mycontext-sync-worker
+      - run: pnpm test
+        working-directory: mycontext-sync-worker
+      - run: pnpm exec wrangler deploy --dry-run
+        working-directory: mycontext-sync-worker

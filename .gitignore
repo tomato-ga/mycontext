@@ -22,6 +22,7 @@ dist/
 .dev.vars
 *.local
 mirror.config.json
+private-exports/
 
 # Logs and local databases.
 logs/

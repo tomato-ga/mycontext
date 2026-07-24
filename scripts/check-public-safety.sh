@@ -47,6 +47,7 @@ for local_path in \
   "mycontext-sync/.env" \
   "mycontext-sync/mirror.config.json" \
   "mycontext-mcp-worker/.dev.vars" \
+  "mycontext-sync-worker/.dev.vars" \
   "MEMORY.md"; do
   if [[ -e "$local_path" ]] && ! git check-ignore -q "$local_path"; then
     echo "Public safety check failed: $local_path exists but is not ignored." >&2

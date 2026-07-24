@@ -1,5 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  BUSINESS_KNOWLEDGE_PARSER_VERSION,
+  BUSINESS_KNOWLEDGE_SECTIONING_VERSION,
+  assertStorageLimits,
+  assertUniqueSectionIds,
+  parseKikakuCatalog,
+  parseKikakuPlaybook,
+  splitContentLines
+} from "./businessKnowledge.js";
 import { requireEnv } from "./config.js";
 import { sha256 } from "./hash.js";
 import { AppError, type EditorKnowledgeDocumentId } from "./types.js";
@@ -27,6 +36,66 @@ export const EDITOR_KNOWLEDGE_SOURCES: readonly EditorKnowledgeSource[] = [
   { documentId: "lesson-07", relativePath: "knowledge/editor-training/07-editor-in-chief.md" }
 ];
 
+/**
+ * kikaku-composition-playbook and kikaku-db-catalog are Editor Knowledge documents (not
+ * Business Knowledge), but they need the "document + section table + search span" shape that
+ * Business Knowledge already has. They are kept in a separate source list from
+ * EDITOR_KNOWLEDGE_SOURCES (which stays a fixed 8-document, non-sectioned allowlist) and are
+ * loaded through loadEditorKnowledgeSectionedDocument below, which reuses the Business
+ * Knowledge parsers/validators unchanged.
+ */
+export type EditorKnowledgeSectionedDocumentId =
+  | "kikaku-composition-playbook"
+  | "kikaku-db-catalog";
+
+export interface EditorKnowledgeSectionedSource {
+  documentId: EditorKnowledgeSectionedDocumentId;
+  relativePath: string;
+}
+
+export const EDITOR_KNOWLEDGE_SECTIONED_SOURCES: readonly EditorKnowledgeSectionedSource[] = [
+  { documentId: "kikaku-composition-playbook", relativePath: "kikaku/composition-playbook.md" },
+  { documentId: "kikaku-db-catalog", relativePath: "kikaku/kikaku-db-catalog.md" }
+];
+
+export type EditorKnowledgeContentLayer = "summary" | "detail" | "index";
+
+export interface EditorKnowledgeSection {
+  documentId: EditorKnowledgeSectionedDocumentId;
+  sectionId: string;
+  sectionRevisionSha256: string;
+  parentSectionId: string | null;
+  deliverySectionId: string;
+  sectionType: "markdown_heading" | "numbered_section";
+  headingLevel: number | null;
+  sectionNumber: string | null;
+  title: string;
+  headingPath: string[];
+  contentLayer: EditorKnowledgeContentLayer;
+  ordinal: number;
+  sourceLineStart: number;
+  sourceLineEnd: number;
+  directMarkdown: string;
+  sectionMarkdown: string;
+  retrievalText: string;
+  contentSha256: string;
+  isSearchable: boolean;
+  relatedSourcePath: string | null;
+  freshnessClass: "static_framework" | "dated_example" | "time_sensitive";
+}
+
+export interface LoadedEditorKnowledgeSectionedDocument {
+  documentId: EditorKnowledgeSectionedDocumentId;
+  title: string;
+  sourcePathKey: string;
+  markdown: string;
+  markdownSha256: string;
+  sectionRevisionSha256: string;
+  sectionCount: number;
+  searchSpanCount: number;
+  sections: EditorKnowledgeSection[];
+}
+
 export function editorKnowledgeSourceRootFromEnv(): string {
   const sourceRoot = requireEnv("EDITOR_KNOWLEDGE_SOURCE_ROOT");
   if (!path.isAbsolute(sourceRoot)) {
@@ -39,10 +108,10 @@ export function editorKnowledgeSourceRootFromEnv(): string {
   return path.resolve(sourceRoot);
 }
 
-export async function loadEditorKnowledgeDocument(
+async function readEditorKnowledgeSourceFile(
   sourceRoot: string,
-  source: EditorKnowledgeSource
-): Promise<LoadedEditorKnowledgeDocument> {
+  source: { documentId: string; relativePath: string }
+): Promise<{ markdown: string; bytes: Buffer }> {
   const absoluteRoot = path.resolve(sourceRoot);
   const sourcePath = path.resolve(absoluteRoot, source.relativePath);
   if (!sourcePath.startsWith(`${absoluteRoot}${path.sep}`)) {
@@ -85,6 +154,14 @@ export async function loadEditorKnowledgeDocument(
     );
   }
 
+  return { markdown, bytes };
+}
+
+export async function loadEditorKnowledgeDocument(
+  sourceRoot: string,
+  source: EditorKnowledgeSource
+): Promise<LoadedEditorKnowledgeDocument> {
+  const { markdown } = await readEditorKnowledgeSourceFile(sourceRoot, source);
   const title = extractMarkdownTitle(markdown, source.documentId);
   return {
     documentId: source.documentId,
@@ -94,7 +171,48 @@ export async function loadEditorKnowledgeDocument(
   };
 }
 
-function extractMarkdownTitle(markdown: string, documentId: EditorKnowledgeDocumentId): string {
+export async function loadEditorKnowledgeSectionedDocument(
+  sourceRoot: string,
+  source: EditorKnowledgeSectionedSource
+): Promise<LoadedEditorKnowledgeSectionedDocument> {
+  const { markdown } = await readEditorKnowledgeSourceFile(sourceRoot, source);
+  const title = extractMarkdownTitle(markdown, source.documentId);
+  const normalizedForParsing = markdown.replace(/\r\n/g, "\n");
+  const lines = splitContentLines(normalizedForParsing);
+  const markdownSha256 = sha256(markdown);
+  const sectionRevisionSha256 = sha256(
+    `${markdownSha256}\0${BUSINESS_KNOWLEDGE_PARSER_VERSION}\0${BUSINESS_KNOWLEDGE_SECTIONING_VERSION}`
+  );
+
+  const parsed = source.documentId === "kikaku-composition-playbook"
+    ? parseKikakuPlaybook(title, lines)
+    : parseKikakuCatalog(title, lines);
+  const sections: EditorKnowledgeSection[] = parsed.sections.map((section, index) => ({
+    ...section,
+    documentId: source.documentId,
+    sectionRevisionSha256,
+    ordinal: index + 1,
+    contentSha256: sha256(section.sectionMarkdown)
+  }));
+
+  assertStorageLimits(markdown, sections);
+  assertUniqueSectionIds(sections);
+
+  const searchSpanCount = sections.filter((section) => section.isSearchable).length;
+  return {
+    documentId: source.documentId,
+    title,
+    sourcePathKey: source.relativePath,
+    markdown,
+    markdownSha256,
+    sectionRevisionSha256,
+    sectionCount: sections.length,
+    searchSpanCount,
+    sections
+  };
+}
+
+function extractMarkdownTitle(markdown: string, documentId: string): string {
   const firstLine = markdown.split(/\r?\n/, 1)[0]?.trim() ?? "";
   const match = /^#\s+(.+)$/.exec(firstLine);
   const title = match?.[1]?.trim() ?? "";

@@ -1,11 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { requireEnv } from "./config.js";
 import { sha256 } from "./hash.js";
 import { parseAuthorStyleRoutingManifest } from "./authorStyleRouting.js";
 import { AppError } from "./types.js";
 
-export const AUTHOR_STYLE_PARSER_VERSION = "author-style-parser-v1";
+export const AUTHOR_STYLE_PARSER_VERSION = "author-style-parser-v2";
 export const AUTHOR_STYLE_SECTIONING_VERSION = "semantic-delivery-v1";
 export const AUTHOR_STYLE_ROUTING_VERSION = "single-context-pack-v1";
 
@@ -72,6 +71,14 @@ export interface LoadedAuthorStyleDocument {
   sections: AuthorStyleSection[];
 }
 
+export interface AuthorStyleMarkdownInput {
+  source: AuthorStyleSource;
+  markdown: string;
+  sourcePathKey: string;
+  sourceMtimeMs: number;
+  sourceBytes?: number;
+}
+
 interface Heading {
   level: number;
   title: string;
@@ -124,7 +131,10 @@ const BODY_MODE_KEYS = {
 } as const;
 
 export function authorStyleSourceRootFromEnv(): string {
-  const sourceRoot = requireEnv("AUTHOR_STYLE_SOURCE_ROOT");
+  const sourceRoot = process.env.AUTHOR_STYLE_SOURCE_ROOT;
+  if (!sourceRoot) {
+    throw new AppError("missing_env", "missing required env var: AUTHOR_STYLE_SOURCE_ROOT", 3);
+  }
   if (!path.isAbsolute(sourceRoot)) {
     throw new AppError(
       "invalid_author_style_source_root",
@@ -165,13 +175,35 @@ export async function loadAuthorStyleDocument(
 
   let markdown: string;
   try {
-    markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+    markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false })
+      .decode(bytes)
+      .replace(/^\uFEFF/, "");
   } catch (error) {
     throw new AppError(
       "author_style_invalid_utf8",
       `author style source is not valid UTF-8: ${source.documentId}`,
       3,
       error
+    );
+  }
+  return parseAuthorStyleMarkdown({
+    source,
+    markdown,
+    sourcePathKey: source.relativePath,
+    sourceMtimeMs: Math.trunc(stat.mtimeMs),
+    sourceBytes: bytes.byteLength
+  });
+}
+
+export function parseAuthorStyleMarkdown(
+  input: AuthorStyleMarkdownInput
+): LoadedAuthorStyleDocument {
+  const { source, markdown } = input;
+  if (!Number.isFinite(input.sourceMtimeMs) || input.sourceMtimeMs < 0) {
+    throw new AppError(
+      "author_style_invalid_source_mtime",
+      `author style source mtime is invalid: ${source.documentId}`,
+      3
     );
   }
   if (markdown.trim().length === 0 || markdown.includes("\0")) {
@@ -220,12 +252,12 @@ export async function loadAuthorStyleDocument(
     authorKey: source.authorKey,
     styleScope: source.styleScope,
     displayName,
-    sourcePathKey: source.relativePath,
+    sourcePathKey: input.sourcePathKey,
     sourceMarkdown: markdown,
     sourceMarkdownSha256,
-    sourceBytes: bytes.byteLength,
+    sourceBytes: input.sourceBytes ?? new TextEncoder().encode(markdown).byteLength,
     sourceLineCount: lines.length,
-    sourceMtimeMs: Math.trunc(stat.mtimeMs),
+    sourceMtimeMs: Math.trunc(input.sourceMtimeMs),
     revisionSha256,
     parserVersion: AUTHOR_STYLE_PARSER_VERSION,
     sectioningVersion: AUTHOR_STYLE_SECTIONING_VERSION,
@@ -345,7 +377,7 @@ function parseBodyStyle(documentTitle: string, lines: string[], headings: Headin
       return heading.level === 3 && heading.line > h2.line && heading.line < nextLine;
     });
 
-    if (chapter === 10 || chapter === 18 || chapter === 22) {
+    if (chapter === 10 || chapter === 18 || chapter === 21) {
       parseBodyChildDeliveries(documentTitle, lines, h2, nextLine, children, chapter, sections);
       continue;
     }
@@ -469,7 +501,7 @@ function bodyH2Definition(title: string, chapter: number | null): BodyDefinition
     17: { contextKey: "ore-body/contract", contentLayer: "runtime", priority: 100 },
     19: { contextKey: "ore-body/evaluator", contentLayer: "evaluation", priority: 100 },
     20: { contextKey: "ore-body/evidence/limitations", contentLayer: "evidence", priority: 20 },
-    21: { contextKey: "ore-body/ops/references", contentLayer: "ops", priority: 20 }
+    22: { contextKey: "ore-body/ops/references", contentLayer: "ops", priority: 20 }
   };
   const definition = chapter === null ? undefined : definitions[chapter];
   if (definition === undefined) {

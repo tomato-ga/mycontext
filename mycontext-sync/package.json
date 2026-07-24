@@ -6,8 +6,10 @@
   "scripts": {
     "migrate": "tsx src/cli.ts migrate",
     "migrate-business-knowledge": "tsx src/cli.ts migrate-business-knowledge",
+    "migrate-editor-knowledge": "tsx src/cli.ts migrate-editor-knowledge",
     "migrate-author-style": "tsx src/cli.ts migrate-author-style",
     "migrate-metaskill": "tsx src/cli.ts migrate-metaskill",
+    "migrate-sync-state-log": "tsx src/cli.ts migrate-sync-state-log",
     "pull": "tsx src/cli.ts pull",
     "pull-editor-knowledge": "tsx src/cli.ts pull-editor-knowledge",
     "pull-business-knowledge": "tsx src/cli.ts pull-business-knowledge",
@@ -19,6 +21,10 @@
     "doctor-author-style": "tsx src/cli.ts doctor-author-style",
     "doctor-metaskill": "tsx src/cli.ts doctor-metaskill",
     "export-obsidian": "tsx src/cli.ts export-obsidian",
+    "export-author-style-markdown": "tsx src/cli.ts export-author-style-markdown",
+    "restore-author-style-markdown": "tsx src/cli.ts restore-author-style-markdown",
+    "preflight-author-style-notion": "tsx src/cli.ts preflight-author-style-notion",
+    "audit-sync-state": "tsx src/cli.ts audit-sync-state",
     "search": "tsx src/cli.ts search",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

@@ -1,11 +1,23 @@
 type JsonObject = Record<string, unknown>;
 
+export interface McpRequestInspection {
+  methods: string[];
+  toolName: string | null;
+  includesToolsList: boolean;
+}
+
 /**
  * OpenAI Apps require OAuth security schemes on the top-level tool descriptor.
  * MCP SDK 1.29 keeps the same data only in `_meta`, so promote it in the
  * serialized tools/list response until the SDK exposes the field directly.
  */
-export async function withOpenAiToolDescriptors(response: Response): Promise<Response> {
+export async function withOpenAiToolDescriptors(
+  response: Response,
+  enabled: boolean
+): Promise<Response> {
+  if (!enabled) {
+    return response;
+  }
   if (!response.headers.get("content-type")?.includes("application/json")) {
     return response;
   }
@@ -28,6 +40,40 @@ export async function withOpenAiToolDescriptors(response: Response): Promise<Res
     statusText: response.statusText,
     headers
   });
+}
+
+export async function inspectMcpRequest(request: Request): Promise<McpRequestInspection> {
+  if (request.method !== "POST" || !request.headers.get("content-type")?.includes("application/json")) {
+    return { methods: [], toolName: null, includesToolsList: false };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await request.clone().json();
+  } catch {
+    return { methods: [], toolName: null, includesToolsList: false };
+  }
+  const requests = Array.isArray(payload) ? payload : [payload];
+  const methods: string[] = [];
+  let toolName: string | null = null;
+  for (const item of requests) {
+    if (!isObject(item)) continue;
+    if (typeof item.method === "string") {
+      methods.push(item.method);
+    }
+    if (
+      item.method === "tools/call" &&
+      isObject(item.params) &&
+      typeof item.params.name === "string"
+    ) {
+      toolName = item.params.name;
+    }
+  }
+  return {
+    methods,
+    toolName,
+    includesToolsList: methods.includes("tools/list")
+  };
 }
 
 export function promoteSecuritySchemes(payload: unknown): boolean {

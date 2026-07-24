@@ -6,7 +6,10 @@ import {
 import { AppError, type PageSyncStatus } from "./types.js";
 
 export interface AuthorStyleWriter {
-  getAuthorStyleDocumentRevision(documentId: string): Promise<string | null>;
+  getAuthorStyleDocumentState(documentId: string): Promise<{
+    activeRevisionSha256: string | null;
+    sourcePathKey: string;
+  } | null>;
   upsertAuthorStyleDocumentAndSections(document: LoadedAuthorStyleDocument): Promise<void>;
 }
 
@@ -38,9 +41,17 @@ export async function syncAuthorStyleDocument(options: {
     if (options.tidbClient === null) {
       throw new AppError("tidb_client_missing", "TiDB client is required", 3);
     }
-    const activeRevision = await options.tidbClient.getAuthorStyleDocumentRevision(
+    const state = await options.tidbClient.getAuthorStyleDocumentState(
       document.documentId
     );
+    if (state?.sourcePathKey.startsWith("notion:")) {
+      throw new AppError(
+        "author_style_source_owned_by_notion",
+        `${document.documentId} is managed by Notion and cannot be overwritten from local Markdown`,
+        3
+      );
+    }
+    const activeRevision = state?.activeRevisionSha256 ?? null;
     dbSkipped = !options.reindex && activeRevision === document.revisionSha256;
     if (!dbSkipped) {
       await options.tidbClient.upsertAuthorStyleDocumentAndSections(document);
